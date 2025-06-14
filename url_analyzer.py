@@ -18,7 +18,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 # Change: Replaced exit() with raising an exception so FastAPI can catch it.
 # This prevents the Render service from crashing on startup if the key is missing.
 try:
-    gemini_api_key = os.getenv("GOOGLE_API_KEY","AIzaSyBSoRYIyGlmJXddW8iATsQovCQHwN0NVUs")
+    gemini_api_key = os.getenv("GOOGLE_API_KEY")
     if not gemini_api_key:
         raise ValueError("GOOGLE_API_KEY environment variable not set.")
     genai.configure(api_key=gemini_api_key)
