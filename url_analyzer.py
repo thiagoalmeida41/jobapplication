@@ -91,11 +91,55 @@ except Exception as e:
 
 
 # --- Web Scraping Function (MODIFIED FOR PLAYWRIGHT) ---
+import requests
+from bs4 import BeautifulSoup
+import logging
+import re
+from urllib.parse import urlparse
+import google.generativeai as genai
+import os
+import json
+from docx import Document
+from docx.opc.exceptions import OpcError
+from typing import Optional, List, Dict
+
+# --- Playwright Imports ---
+# Change: Explicitly import sync_playwright for clarity
+from playwright.sync_api import sync_playwright, Playwright, TimeoutError as PlaywrightTimeoutError
+
+# --- Logging Configuration ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# --- Gemini API Configuration ---
+try:
+    gemini_api_key = os.getenv("GOOGLE_API_KEY")
+    if not gemini_api_key:
+        raise ValueError("GOOGLE_API_KEY environment variable not set.")
+    genai.configure(api_key=gemini_api_key)
+    logging.info("Gemini API key loaded from environment variable.")
+except ValueError as e:
+    logging.error(f"Configuration error: {e}")
+    raise RuntimeError(f"Gemini API configuration failed: {e}. Please ensure GOOGLE_API_KEY is set.")
+except Exception as e:
+    logging.error(f"An unexpected error occurred during Gemini API configuration: {e}", exc_info=True)
+    raise RuntimeError(f"Gemini API configuration failed unexpectedly: {e}")
+
+
+# Initialize the Gemini model globally
+try:
+    model = genai.GenerativeModel('gemini-1.5-flash')
+except Exception as e:
+    logging.error(f"Failed to initialize Gemini model 'gemini-1.5-flash': {e}", exc_info=True)
+    raise RuntimeError(f"Failed to initialize Gemini model: {e}")
+
+
+# --- Web Scraping Function (OPTIMIZED FOR RENDER/FREE TIERS) ---
 def scrape_url_content(url: str) -> Optional[str]:
     """
     Fetches a URL and scrapes visible text content from it, using Playwright for dynamic content.
+    Optimized for resource-constrained environments.
     """
-    logging.info(f"Attempting to scrape URL: {url} with Playwright.")
+    logging.info(f"Attempting to scrape URL: {url} with Playwright (optimized).")
 
     parsed_url = urlparse(url)
     if not all([parsed_url.scheme, parsed_url.netloc]):
@@ -105,15 +149,57 @@ def scrape_url_content(url: str) -> Optional[str]:
     page_content = None
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True) # Use headless mode for server deployment
+            # Change: Use 'args' to limit Chromium's resource usage
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    '--no-sandbox', # Required for some container environments like Render
+                    '--disable-gpu',
+                    '--single-process', # IMPORTANT: Uses less memory, but might be slower/less stable
+                    '--disable-dev-shm-usage', # Addresses /dev/shm issues in containers
+                    '--disable-setuid-sandbox',
+                    '--disable-accelerated-2d-canvas',
+                    '--no-zygote'
+                ]
+            )
             page = browser.new_page()
             
-            # Navigate and wait for the network to be idle, implying content loaded
-            # Increased timeout for navigation for slower pages.
-            page.goto(url, wait_until='networkidle', timeout=60000) # 60 seconds
+            # Change: Set a smaller viewport for potentially faster rendering
+            page.set_viewport_size({"width": 800, "height": 600}) 
+
+            # Change: Block unnecessary resources (images, fonts, media) to save bandwidth and memory
+            page.route("**/*", lambda route: (
+                route.abort()
+                if route.request.resource_type in ["image", "media", "font", "stylesheet"] # Block stylesheets too
+                else route.continue()
+            ))
+
+            # Navigate and wait for the network to be idle
+            page.goto(url, wait_until='domcontentloaded', timeout=45000) # Reduced timeout slightly, 'domcontentloaded' is faster
             
-            # Give a little extra time for dynamic content to settle (optional, but can help)
-            page.wait_for_timeout(3000) # Wait for 3 seconds
+            # Change: wait_for_selector for common job description elements (more robust than just timeout)
+            # This makes sure the JS has rendered *something* before scraping.
+            # Add more selectors if specific sites are problematic.
+            job_desc_selectors = [
+                'div[data-automation-id="jobPostingDescription"]', # Workday
+                'div.jobDetails', # Workday fallback
+                'div[data-ui="job-description"]', # Ashby
+                '.ashby-job-posting__content', # Ashby fallback
+                'div#content', # Greenhouse
+                '.job-description', # General
+                'body' # Absolute fallback
+            ]
+            
+            # Try to wait for any of the main content elements
+            try:
+                page.wait_for_selector(
+                    "|".join(job_desc_selectors), # Use | to combine selectors
+                    timeout=15000 # Wait up to 15 seconds for content to appear
+                )
+                logging.info("Playwright: Job description selector found, content likely rendered.")
+            except PlaywrightTimeoutError:
+                logging.warning("Playwright: Job description selector not found within timeout. Proceeding with current content.")
+
 
             page_content = page.content() # Get the fully rendered HTML
             browser.close()
@@ -133,7 +219,7 @@ def scrape_url_content(url: str) -> Optional[str]:
     # Now, use BeautifulSoup to parse the fully rendered HTML
     soup = BeautifulSoup(page_content, 'html.parser')
 
-    # Remove elements that typically don't contain main content
+    # Remove elements that typically don't contain main content (expanded list)
     for unwanted_tag_selector in [
         'script', 'style', 'header', 'footer', 'nav', 'aside', 'form', 'button',
         'img', 'svg', 'iframe', 'noscript', 'meta', 'link', 'title', 'head',
@@ -141,56 +227,52 @@ def scrape_url_content(url: str) -> Optional[str]:
         '.modal', '.overlay', '.share-buttons', '.social-media', '.pagination',
         '.breadcrumb', '.skip-link', '#skip-link', '#footer', '#header', '#navbar',
         '.top-card-layout__card', # LinkedIn specific top card
-        '.sub-nav', '.global-footer', '.sign-in-banner'
+        '.sub-nav', '.global-footer', '.sign-in-banner',
+        'svg', 'path', 'circle', 'img', # Ensure all image/vector elements are removed
+        'div[aria-hidden="true"]', # Sometimes used for hidden elements
+        '[role="banner"]', '[role="navigation"]', '[role="contentinfo"]', # ARIA roles
+        '.skip-to-content', '.visually-hidden', # Hidden utility classes
+        '.hidden', '.sr-only' # More hidden classes
     ]:
-        if unwanted_tag_selector.startswith('.') or unwanted_tag_selector.startswith('#'):
-            for element in soup.select(unwanted_tag_selector):
-                element.decompose()
-        else: # Assume it's a tag name
-            for element in soup.find_all(unwanted_tag_selector):
-                element.decompose()
+        try:
+            if unwanted_tag_selector.startswith('.') or unwanted_tag_selector.startswith('#') or '[' in unwanted_tag_selector:
+                for element in soup.select(unwanted_tag_selector):
+                    element.decompose()
+            else: # Assume it's a tag name
+                for element in soup.find_all(unwanted_tag_selector):
+                    element.decompose()
+        except Exception as e:
+            logging.warning(f"Error decomposing selector {unwanted_tag_selector}: {e}") # Non-critical error
+
 
     # Find specific job description containers after rendering.
-    # This is still important as even with Playwright, you want to target the relevant content.
     content_element = None
-    for selector in [
-        'div#content',                 # Common for Greenhouse.io
-        'div.job-description',         # Common for many sites
-        'section.job-details',
-        'div[data-qa="job-description"]', # Common for some job boards
-        'div.description',
-        'div.full-description',
-        'div[itemprop="description"]', # Microdata standard
-        'article.job-content',
-        # --- NEW: Add selectors for Workday and AshbyHQ (inspect these manually if needed) ---
-        'div.gdpr--text',              # Sometimes seen on Workday or similar popups
-        'div.jobDetails',              # Common for Workday after JS render
-        'div[data-automation-id="jobPostingDescription"]', # Very common for Workday
-        'div[data-ui="job-description"]', # For AshbyHQ (needs verification, inspect their HTML)
-        '.ashby-job-posting__content' # Another potential for Ashby
-    ]:
+    for selector in job_desc_selectors: # Re-use the list of selectors
         content_element = soup.select_one(selector)
         if content_element:
-            logging.info(f"Found job description via selector: {selector}")
+            logging.info(f"Final BeautifulSoup: Found job description via selector: {selector}")
             break
 
     extracted_text = ""
     if content_element:
         extracted_text = content_element.get_text(separator='\n', strip=True)
     else:
-        # Fallback to entire body text if specific element not found after rendering
-        logging.warning("No specific job description element found after Playwright render, attempting full body text.")
+        logging.warning("Final BeautifulSoup: No specific job description element found, attempting full body text.")
         body_text = soup.body.get_text(separator='\n', strip=True) if soup.body else ""
-        extracted_text = body_text[:15000] # Cap fallback at 15k chars
+        extracted_text = body_text # No initial cap here, will truncate later
 
     # Clean up excessive whitespace and newlines
-    extracted_text = re.sub(r'[\n\r]+', '\n', extracted_text).strip()
-    extracted_text = re.sub(r'[ \t]+', ' ', extracted_text).strip()
+    extracted_text = re.sub(r'[\n\r]+', '\n', extracted_text).strip() # Consolidate multiple newlines into single
+    extracted_text = re.sub(r'[ \t]+', ' ', extracted_text).strip() # Consolidate multiple spaces/tabs
 
-    # Truncate if the text is extremely long (after cleaning)
-    if len(extracted_text) > 15000:
-        logging.warning(f"Final extracted content length ({len(extracted_text)}) exceeds 15000 characters. Truncating.")
-        extracted_text = extracted_text[:14900] + "\n\n[TEXT TRUNCATED DUE TO EXTREME LENGTH]..."
+    # Change: Truncate BEFORE sending to Gemini, but also for the Google Sheet cell limit.
+    # Keep the original 15000 character limit for LLM, but also ensure it's not too big for cell.
+    # We will aim for a limit around 45,000 characters for the *final* string to put in the cell,
+    # as 50,000 is the hard limit.
+    max_final_char_limit = 45000 
+    if len(extracted_text) > max_final_char_limit:
+        logging.warning(f"Final extracted content length ({len(extracted_text)}) exceeds {max_final_char_limit} characters. Truncating for Google Sheet/LLM.")
+        extracted_text = extracted_text[:(max_final_char_limit - 100)] + "\n\n[CONTENT TRUNCATED DUE TO LENGTH LIMITS]..."
 
     if not extracted_text:
         logging.error(f"No meaningful text extracted from {url} after Playwright and BeautifulSoup processing.")
@@ -199,10 +281,89 @@ def scrape_url_content(url: str) -> Optional[str]:
     logging.info(f"Successfully scraped and processed content from {url}. Length: {len(extracted_text)} characters.")
     return extracted_text
 
-# --- Rest of your url_analyzer.py file (parse_cv_document, analyze_job_posting_with_gemini, __main__ block) remains the same ---
-# ... (your parse_cv_document function)
-# ... (your analyze_job_posting_with_gemini function)
-# ... (your if __name__ == "__main__": block)
+
+# --- Function: Parse CV Document ---
+# ... (this function remains the same as your original)
+def parse_cv_document(file_path: str) -> Optional[str]:
+    # ... (your original parse_cv_document code)
+    if not os.path.exists(file_path):
+        logging.error(f"CV file not found at: {file_path}")
+        return None
+
+    if not file_path.lower().endswith('.docx'):
+        logging.warning(f"Unsupported file format for CV: {os.path.basename(file_path)}. "
+                         "Only .docx files are directly supported by this parser. "
+                         "Please convert your CV to .docx format or provide a .docx file.")
+        return None
+
+    try:
+        doc = Document(file_path)
+        full_text = []
+        for para in doc.paragraphs:
+            full_text.append(para.text)
+        cv_content = "\n".join(full_text).strip()
+        logging.info(f"Successfully parsed CV from {file_path}. Length: {len(cv_content)} characters.")
+        return cv_content
+    except OpcError as e:
+        logging.error(f"Error opening or reading .docx file {file_path}: {e}. "
+                      "It might be corrupted or not a valid .docx file.")
+        return None
+    except Exception as e:
+        logging.error(f"An unexpected error occurred while parsing CV {file_path}: {e}", exc_info=True)
+        return None
+
+
+# --- Gemini Prompting Functions ---
+# ... (this function remains the same as your original, but it will receive truncated job_content)
+def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional[str]) -> Dict[str, any]:
+    # ... (your original analyze_job_posting_with_gemini code)
+    # Ensure your prompts now refer to the potentially truncated 'content' for job_description
+    # and that the 'JOB_DESCRIPTION' in the final_result uses the truncated 'content'.
+    # Example:
+    final_result = {
+        "JOB_TITLE": "N/A", "COMPANY": "N/A", "URL": url, "LOCATION": "N/A",
+        "JOB_DESCRIPTION": content, # Use the potentially truncated content here
+        "CHALLENGE_AND_ROOT_CAUSE": "N/A",
+        "COVER_LETTER_HOOK": "N/A", "COVER_LETTER": "N/A",
+        "TELL_ME_ABOUT_YOURSELF": "N/A", "MAIN_CHANGES_TO_MY_CV": [],
+        "QUESTIONS_TO_ASK": []
+    }
+    # ... (rest of the function)
+
+# --- Main Execution Block ---
+# ... (this block remains the same as your original)
+if __name__ == "__main__":
+    # ... (your original __main__ block)
+    test_url = input("Enter the URL of the job posting to analyze: ")
+    if not test_url.startswith('http'):
+        print("Please enter a full URL starting with http:// or https://")
+        exit()
+
+    cv_file_path = input("Enter the full path to your CV file (e.g., C:\\Users\\You\\Documents\\MyCV.docx) (leave blank to skip CV analysis): ")
+
+    cv_content = None
+    if cv_file_path:
+        cv_content = parse_cv_document(cv_file_path)
+        if cv_content is None:
+            print(f"Failed to parse CV from '{cv_file_path}'. Analysis will proceed without CV content.")
+
+    print(f"\n--- Starting job posting analysis for: {test_url} ---")
+
+    scraped_content = scrape_url_content(test_url)
+
+    if scraped_content:
+        print("\n--- RAW SCRAPED CONTENT (for review): ---")
+        print(scraped_content)
+        print("\n--- END OF RAW SCRAPED CONTENT ---")
+
+        print("\n--- Content Scraped successfully. Analyzing with Gemini... ---")
+        analysis_result = analyze_job_posting_with_gemini(scraped_content, test_url, cv_content)
+
+        print("\n--- Final Structured Analysis Result: ---")
+        print(json.dumps(analysis_result, indent=4, ensure_ascii=False))
+    else:
+        print("\n--- Failed to scrape job posting content. Cannot proceed with Gemini analysis. ---")
+
 
 
 
