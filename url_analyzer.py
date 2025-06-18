@@ -49,105 +49,162 @@ except Exception as e:
 
 
 # --- Web Scraping Function ---
-def scrape_url_content(url: str) -> Optional[str]: # Changed return type hint to Optional[str]
+import requests
+from bs4 import BeautifulSoup
+import logging
+import re
+from urllib.parse import urlparse
+import google.generativeai as genai
+import os
+import json
+from docx import Document
+from docx.opc.exceptions import OpcError
+from typing import Optional, List, Dict
+
+# --- Playwright Imports ---
+from playwright.sync_api import sync_playwright, Playwright, TimeoutError as PlaywrightTimeoutError
+
+# --- Logging Configuration ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# --- Gemini API Configuration ---
+try:
+    gemini_api_key = os.getenv("GOOGLE_API_KEY")
+    if not gemini_api_key:
+        raise ValueError("GOOGLE_API_KEY environment variable not set.")
+    genai.configure(api_key=gemini_api_key)
+    logging.info("Gemini API key loaded from environment variable.")
+except ValueError as e:
+    logging.error(f"Configuration error: {e}")
+    raise RuntimeError(f"Gemini API configuration failed: {e}. Please ensure GOOGLE_API_KEY is set.")
+except Exception as e:
+    logging.error(f"An unexpected error occurred during Gemini API configuration: {e}", exc_info=True)
+    raise RuntimeError(f"Gemini API configuration failed unexpectedly: {e}")
+
+
+# Initialize the Gemini model globally
+try:
+    model = genai.GenerativeModel('gemini-1.5-flash')
+except Exception as e:
+    logging.error(f"Failed to initialize Gemini model 'gemini-1.5-flash': {e}", exc_info=True)
+    raise RuntimeError(f"Failed to initialize Gemini model: {e}")
+
+
+# --- Web Scraping Function (MODIFIED FOR PLAYWRIGHT) ---
+def scrape_url_content(url: str) -> Optional[str]:
     """
-    Fetches a URL and scrapes visible text content from it.
-    This version aims to capture as much content as possible while
-    removing common non-content tags and cleaning whitespace.
+    Fetches a URL and scrapes visible text content from it, using Playwright for dynamic content.
     """
-    logging.info(f"Attempting to scrape URL: {url}")
+    logging.info(f"Attempting to scrape URL: {url} with Playwright.")
 
     parsed_url = urlparse(url)
     if not all([parsed_url.scheme, parsed_url.netloc]):
         logging.error(f"Invalid URL format: {url}. Please provide a complete URL including scheme (e.g., 'https://').")
         return None
 
+    page_content = None
     try:
-        # Set a User-Agent header to mimic a browser and avoid some blocks
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
-        # Make the HTTP GET request with a timeout
-        response = requests.get(url, headers=headers, timeout=20) # Increased timeout slightly
-        response.raise_for_status()  # Raise an exception for HTTP errors (4xx or 5xx)
-        logging.info(f"Successfully fetched content from {url} (Status: {response.status_code})")
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True) # Use headless mode for server deployment
+            page = browser.new_page()
+            
+            # Navigate and wait for the network to be idle, implying content loaded
+            # Increased timeout for navigation for slower pages.
+            page.goto(url, wait_until='networkidle', timeout=60000) # 60 seconds
+            
+            # Give a little extra time for dynamic content to settle (optional, but can help)
+            page.wait_for_timeout(3000) # Wait for 3 seconds
 
-        soup = BeautifulSoup(response.text, 'html.parser')
+            page_content = page.content() # Get the fully rendered HTML
+            browser.close()
+            logging.info(f"Successfully fetched rendered content from {url} with Playwright.")
 
-        # Find specific common content containers first for better accuracy
-        # Change: Added more specific selectors common on job boards.
-        # Prioritize these before aggressive general cleanup.
-        content_element = None
-        for selector in [
-            'div#content',                 # Common for Greenhouse.io
-            'div.job-description',         # Common for many sites
-            'section.job-details',
-            'div[data-qa="job-description"]', # Common for some job boards
-            'div.description',
-            'div.full-description',
-            'div[itemprop="description"]', # Microdata standard
-            'article.job-content'
-        ]:
-            content_element = soup.select_one(selector)
-            if content_element:
-                logging.info(f"Found content via selector: {selector}")
-                break
-
-        # If a specific content element is found, work within it.
-        # Otherwise, perform more general filtering on the whole body.
-        if content_element:
-            target_soup = content_element
-            logging.info("Scraping within specific content element.")
-        else:
-            target_soup = soup.body if soup.body else soup
-            logging.warning("No specific job description element found, scraping entire body/document.")
-
-
-        # Remove elements that typically don't contain main content from the target_soup
-        # or are navigation/boilerplate. This list is expanded for more aggressive filtering.
-        for unwanted_tag_selector in [
-            'script', 'style', 'header', 'footer', 'nav', 'aside', 'form', 'button',
-            'img', 'svg', 'iframe', 'noscript', 'meta', 'link', 'title', 'head',
-            # Common classes/ids for small, repetitive, or non-content elements
-            '.header', '.footer', '.navbar', '.sidebar', '.ad', '.ads', '.cookie-banner',
-            '.modal', '.overlay', '.share-buttons', '.social-media', '.pagination',
-            '.breadcrumb', '.skip-link', '#skip-link', '#footer', '#header', '#navbar',
-            '.top-card-layout__card', # LinkedIn specific top card
-            '.sub-nav', '.global-footer', '.sign-in-banner'
-        ]:
-            if unwanted_tag_selector.startswith('.') or unwanted_tag_selector.startswith('#'):
-                for element in target_soup.select(unwanted_tag_selector):
-                    element.decompose()
-            else: # Assume it's a tag name
-                for element in target_soup.find_all(unwanted_tag_selector):
-                    element.decompose()
-
-        # Get all remaining visible text, using '\n' as separator to preserve lines/paragraphs
-        extracted_text = target_soup.get_text(separator='\n', strip=True)
-
-        # Change: More careful newline consolidation. Preserve single newlines for paragraphs.
-        extracted_text = re.sub(r'[\n\r]+', '\n', extracted_text).strip() # Consolidate multiple newlines into single
-        extracted_text = re.sub(r'[ \t]+', ' ', extracted_text).strip() # Consolidate multiple spaces/tabs
-
-        # Truncate if the text is extremely long to prevent issues with LLM token limits.
-        # Adjusted limit to 15000 characters (approx. 3750 tokens) to allow more content.
-        if len(extracted_text) > 15000:
-            logging.warning(f"Scraped content length ({len(extracted_text)}) exceeds 15000 characters. Truncating.")
-            extracted_text = extracted_text[:14900] + "\n\n[TEXT TRUNCATED DUE TO EXTREME LENGTH]..."
-
-
-        logging.info(f"Successfully scraped content from {url}. Length: {len(extracted_text)} characters (final extract).")
-        return extracted_text
-
-    except requests.exceptions.Timeout as e:
-        logging.error(f"Timeout occurred while fetching {url}: {e}")
-        return None
-    except requests.exceptions.RequestException as e:
-        logging.error(f"HTTP request error for {url}: {e}", exc_info=True)
+    except PlaywrightTimeoutError as e:
+        logging.error(f"Playwright navigation/wait timed out for {url}: {e}")
         return None
     except Exception as e:
-        logging.error(f"An unexpected error occurred during scraping {url}: {e}", exc_info=True)
+        logging.error(f"An unexpected Playwright error occurred during scraping {url}: {e}", exc_info=True)
         return None
+
+    if not page_content:
+        logging.error(f"Playwright returned empty content for {url}.")
+        return None
+
+    # Now, use BeautifulSoup to parse the fully rendered HTML
+    soup = BeautifulSoup(page_content, 'html.parser')
+
+    # Remove elements that typically don't contain main content
+    for unwanted_tag_selector in [
+        'script', 'style', 'header', 'footer', 'nav', 'aside', 'form', 'button',
+        'img', 'svg', 'iframe', 'noscript', 'meta', 'link', 'title', 'head',
+        '.header', '.footer', '.navbar', '.sidebar', '.ad', '.ads', '.cookie-banner',
+        '.modal', '.overlay', '.share-buttons', '.social-media', '.pagination',
+        '.breadcrumb', '.skip-link', '#skip-link', '#footer', '#header', '#navbar',
+        '.top-card-layout__card', # LinkedIn specific top card
+        '.sub-nav', '.global-footer', '.sign-in-banner'
+    ]:
+        if unwanted_tag_selector.startswith('.') or unwanted_tag_selector.startswith('#'):
+            for element in soup.select(unwanted_tag_selector):
+                element.decompose()
+        else: # Assume it's a tag name
+            for element in soup.find_all(unwanted_tag_selector):
+                element.decompose()
+
+    # Find specific job description containers after rendering.
+    # This is still important as even with Playwright, you want to target the relevant content.
+    content_element = None
+    for selector in [
+        'div#content',                 # Common for Greenhouse.io
+        'div.job-description',         # Common for many sites
+        'section.job-details',
+        'div[data-qa="job-description"]', # Common for some job boards
+        'div.description',
+        'div.full-description',
+        'div[itemprop="description"]', # Microdata standard
+        'article.job-content',
+        # --- NEW: Add selectors for Workday and AshbyHQ (inspect these manually if needed) ---
+        'div.gdpr--text',              # Sometimes seen on Workday or similar popups
+        'div.jobDetails',              # Common for Workday after JS render
+        'div[data-automation-id="jobPostingDescription"]', # Very common for Workday
+        'div[data-ui="job-description"]', # For AshbyHQ (needs verification, inspect their HTML)
+        '.ashby-job-posting__content' # Another potential for Ashby
+    ]:
+        content_element = soup.select_one(selector)
+        if content_element:
+            logging.info(f"Found job description via selector: {selector}")
+            break
+
+    extracted_text = ""
+    if content_element:
+        extracted_text = content_element.get_text(separator='\n', strip=True)
+    else:
+        # Fallback to entire body text if specific element not found after rendering
+        logging.warning("No specific job description element found after Playwright render, attempting full body text.")
+        body_text = soup.body.get_text(separator='\n', strip=True) if soup.body else ""
+        extracted_text = body_text[:15000] # Cap fallback at 15k chars
+
+    # Clean up excessive whitespace and newlines
+    extracted_text = re.sub(r'[\n\r]+', '\n', extracted_text).strip()
+    extracted_text = re.sub(r'[ \t]+', ' ', extracted_text).strip()
+
+    # Truncate if the text is extremely long (after cleaning)
+    if len(extracted_text) > 15000:
+        logging.warning(f"Final extracted content length ({len(extracted_text)}) exceeds 15000 characters. Truncating.")
+        extracted_text = extracted_text[:14900] + "\n\n[TEXT TRUNCATED DUE TO EXTREME LENGTH]..."
+
+    if not extracted_text:
+        logging.error(f"No meaningful text extracted from {url} after Playwright and BeautifulSoup processing.")
+        return None
+
+    logging.info(f"Successfully scraped and processed content from {url}. Length: {len(extracted_text)} characters.")
+    return extracted_text
+
+# --- Rest of your url_analyzer.py file (parse_cv_document, analyze_job_posting_with_gemini, __main__ block) remains the same ---
+# ... (your parse_cv_document function)
+# ... (your analyze_job_posting_with_gemini function)
+# ... (your if __name__ == "__main__": block)
+
+
 
 # --- Function: Parse CV Document ---
 def parse_cv_document(file_path: str) -> Optional[str]:
