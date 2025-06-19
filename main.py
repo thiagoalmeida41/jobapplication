@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 # Import the core logic functions from your url_analyzer.py script
 # Ensure url_analyzer.py is in the same directory or accessible in PYTHONPATH
+# Changed: The imported functions are now async, so they will be awaited below.
 from url_analyzer import scrape_url_content, parse_cv_document, analyze_job_posting_with_gemini
 
 # Configure logging for the API application
@@ -36,7 +37,7 @@ async def analyze_job(
     to generate personalized application content.
 
     Parameters:
-    - url: The URL of the job posting (e.g., https://www.linkedin.com/jobs/view/...).
+    - url: The URL of the job posting (e.g., https://www.linkedin.com/jobs/view...).
     - cv_file: Your CV file in .docx format (optional).
     """
     logging.info(f"Received request to analyze job: {url}")
@@ -48,9 +49,9 @@ async def analyze_job(
             logging.error(f"Unsupported CV file format: {cv_file.filename}. Only .docx is supported.")
             raise HTTPException(status_code=400, detail="Only .docx files are supported for CV.")
 
-        # Save the uploaded file temporarily to process it
+        # Using /tmp/ for temporary files as it's the standard for cloud environments like Render
         temp_cv_path = f"/tmp/{cv_file.filename}" if os.name != 'nt' else f"C:\\Temp\\{cv_file.filename}"
-        os.makedirs(os.path.dirname(temp_cv_path), exist_ok=True) # Ensure directory exists
+        os.makedirs(os.path.dirname(temp_cv_path), exist_ok=True)
 
         try:
             with open(temp_cv_path, "wb") as buffer:
@@ -58,25 +59,24 @@ async def analyze_job(
                 buffer.write(content)
             logging.info(f"CV file '{cv_file.filename}' saved temporarily to '{temp_cv_path}'.")
 
-            # Parse CV content
+            # parse_cv_document is synchronous, no await needed here
             cv_content = parse_cv_document(temp_cv_path)
             if cv_content is None:
                 logging.warning(f"Failed to parse CV from '{temp_cv_path}'. Analysis will proceed without CV content.")
                 # If parsing fails, remove the temp file but allow process to continue
-                os.remove(temp_cv_path)
                 raise HTTPException(status_code=422, detail=f"Failed to parse CV content. Please check your .docx file. Analysis will continue without CV data.")
 
         except Exception as e:
             logging.error(f"Error processing CV file: {e}", exc_info=True)
-            if os.path.exists(temp_cv_path):
-                os.remove(temp_cv_path) # Clean up temp file on error
             raise HTTPException(status_code=500, detail=f"Internal server error processing CV: {str(e)}")
         finally:
             if os.path.exists(temp_cv_path):
                 os.remove(temp_cv_path) # Ensure temp file is removed after use
+                logging.info(f"Temporary CV file '{temp_cv_path}' removed.")
 
     # 2. Scrape Job Posting Content
-    scraped_content = scrape_url_content(url)
+    # Change: AWAIT the asynchronous scrape_url_content function
+    scraped_content = await scrape_url_content(url)
 
     if not scraped_content:
         logging.error(f"Failed to scrape content from URL: {url}")
@@ -84,7 +84,8 @@ async def analyze_job(
 
     # 3. Analyze Content with Gemini AI
     try:
-        analysis_result = analyze_job_posting_with_gemini(scraped_content, url, cv_content)
+        # Change: AWAIT the asynchronous analyze_job_posting_with_gemini function
+        analysis_result = await analyze_job_posting_with_gemini(scraped_content, url, cv_content)
         return JSONResponse(content=analysis_result)
     except Exception as e:
         logging.error(f"Error during Gemini analysis: {e}", exc_info=True)
@@ -94,4 +95,3 @@ async def analyze_job(
 # if __name__ == "__main__":
 #     import uvicorn
 #     uvicorn.run(app, host="0.0.0.0", port=8000)
-
