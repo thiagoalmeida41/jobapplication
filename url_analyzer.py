@@ -11,7 +11,6 @@ from docx.opc.exceptions import OpcError
 from typing import Optional, List, Dict
 
 # --- Playwright Imports ---
-# Change: Import async_playwright instead of sync_playwright
 from playwright.async_api import async_playwright, Playwright, TimeoutError as PlaywrightTimeoutError
 
 # --- Logging Configuration ---
@@ -40,8 +39,7 @@ except Exception as e:
     raise RuntimeError(f"Failed to initialize Gemini model: {e}")
 
 
-# --- Web Scraping Function (MODIFIED TO BE ASYNC) ---
-# Change: Made function 'async'
+# --- Web Scraping Function (WITH EXPLICIT EXECUTABLE PATH) ---
 async def scrape_url_content(url: str) -> Optional[str]:
     """
     Fetches a URL and scrapes visible text content from it, using Playwright for dynamic content.
@@ -56,54 +54,47 @@ async def scrape_url_content(url: str) -> Optional[str]:
 
     page_content = None
     try:
-        # Change: Use async_playwright()
         async with async_playwright() as p:
-            # Change: Await browser launch
+            # FIX: Specify the executable_path to the system-installed Chromium
             browser = await p.chromium.launch(
                 headless=True,
+                executable_path="/usr/bin/chromium-browser", # <--- ADD THIS LINE
                 args=[
-                    '--no-sandbox',
+                    '--no-sandbox', # Required for some container environments like Render
                     '--disable-gpu',
-                    '--single-process',
-                    '--disable-dev-shm-usage',
+                    '--single-process', # IMPORTANT: Uses less memory, but might be slower/less stable
+                    '--disable-dev-shm-usage', # Addresses /dev/shm issues in containers
                     '--disable-setuid-sandbox',
                     '--disable-accelerated-2d-canvas',
                     '--no-zygote'
                 ]
             )
-            # Change: Await new page
             page = await browser.new_page()
             
-            # Change: Await set_viewport_size
             await page.set_viewport_size({"width": 800, "height": 600}) 
 
-            # CORRECTED SYNTAX: Use an explicit async function for page.route
-            async def handle_route(route):
+            def handle_route(route):
                 if route.request.resource_type in ["image", "media", "font", "stylesheet"]:
-                    await route.abort()
+                    route.abort()
                 else:
-                    await route.continue_() 
+                    route.continue_() 
 
-            # Change: Await page.route
             await page.route("**/*", handle_route)
 
 
-            # Navigate and wait for the network to be idle
-            # Change: Await page.goto
             await page.goto(url, wait_until='domcontentloaded', timeout=45000) 
             
             job_desc_selectors = [
-                'div[data-automation-id="jobPostingDescription"]',
-                'div.jobDetails',
-                'div[data-ui="job-description"]',
-                '.ashby-job-posting__content',
-                'div#content',
-                '.job-description',
-                'body'
+                'div[data-automation-id="jobPostingDescription"]', # Workday
+                'div.jobDetails', # Workday fallback
+                'div[data-ui="job-description"]', # Ashby
+                '.ashby-job-posting__content', # Ashby fallback
+                'div#content', # Greenhouse
+                '.job-description', # General
+                'body' # Absolute fallback
             ]
             
             try:
-                # Change: Await page.wait_for_selector
                 await page.wait_for_selector(
                     "|".join(job_desc_selectors), 
                     timeout=15000 
@@ -113,9 +104,7 @@ async def scrape_url_content(url: str) -> Optional[str]:
                 logging.warning("Playwright: Job description selector not found within timeout. Proceeding with current content.")
 
 
-            # Change: Await page.content()
             page_content = await page.content() 
-            # Change: Await browser.close()
             await browser.close()
             logging.info(f"Successfully fetched rendered content from {url} with Playwright.")
 
@@ -130,10 +119,8 @@ async def scrape_url_content(url: str) -> Optional[str]:
         logging.error(f"Playwright returned empty content for {url}.")
         return None
 
-    # Now, use BeautifulSoup to parse the fully rendered HTML
     soup = BeautifulSoup(page_content, 'html.parser')
 
-    # Remove elements that typically don't contain main content (expanded list)
     for unwanted_tag_selector in [
         'script', 'style', 'header', 'footer', 'nav', 'aside', 'form', 'button',
         'img', 'svg', 'iframe', 'noscript', 'meta', 'link', 'title', 'head',
@@ -159,7 +146,6 @@ async def scrape_url_content(url: str) -> Optional[str]:
             logging.warning(f"Error decomposing selector {unwanted_tag_selector}: {e}")
 
 
-    # Find specific job description containers after rendering.
     content_element = None
     for selector in job_desc_selectors:
         content_element = soup.select_one(selector)
@@ -192,7 +178,6 @@ async def scrape_url_content(url: str) -> Optional[str]:
 
 
 # --- Function: Parse CV Document ---
-# This function is synchronous and does not need changes
 def parse_cv_document(file_path: str) -> Optional[str]:
     """
     Parses a .docx file and extracts its text content.
@@ -225,7 +210,6 @@ def parse_cv_document(file_path: str) -> Optional[str]:
 
 
 # --- Gemini Prompting Functions ---
-# Change: Made analyze_job_posting_with_gemini async because it will call async scrape_url_content
 async def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional[str]) -> Dict[str, any]:
     """
     Analyzes job posting and CV content using Gemini AI.
@@ -335,6 +319,7 @@ async def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Op
         logging.info(f"Prompt 1 successful. Job Title: {job_title}, Company: {company}")
     except json.JSONDecodeError as e:
         logging.error(f"Error parsing JSON from Prompt 1: {e}. Raw response: '{response1.text}'")
+        # Added more robust markdown wrapper removal
         cleaned_text = response1.text.strip()
         if cleaned_text.startswith("```json") and cleaned_text.endswith("```"):
             cleaned_text = cleaned_text[len("```json"): -len("```")].strip()
