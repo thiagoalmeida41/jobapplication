@@ -11,7 +11,8 @@ from docx.opc.exceptions import OpcError
 from typing import Optional, List, Dict
 
 # --- Playwright Imports ---
-from playwright.sync_api import sync_playwright, Playwright, TimeoutError as PlaywrightTimeoutError
+# Change: Import async_playwright instead of sync_playwright
+from playwright.async_api import async_playwright, Playwright, TimeoutError as PlaywrightTimeoutError
 
 # --- Logging Configuration ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -25,7 +26,6 @@ try:
     logging.info("Gemini API key loaded from environment variable.")
 except ValueError as e:
     logging.error(f"Configuration error: {e}")
-    # Raise a RuntimeError so FastAPI can catch it and log properly without crashing completely
     raise RuntimeError(f"Gemini API configuration failed: {e}. Please ensure GOOGLE_API_KEY is set.")
 except Exception as e:
     logging.error(f"An unexpected error occurred during Gemini API configuration: {e}", exc_info=True)
@@ -34,20 +34,20 @@ except Exception as e:
 
 # Initialize the Gemini model globally
 try:
-    # Use 'gemini-1.5-flash' as per your original code.
     model = genai.GenerativeModel('gemini-1.5-flash')
 except Exception as e:
     logging.error(f"Failed to initialize Gemini model 'gemini-1.5-flash': {e}", exc_info=True)
     raise RuntimeError(f"Failed to initialize Gemini model: {e}")
 
 
-# --- Web Scraping Function (FINAL PLAYWRIGHT SYNTAX FIX) ---
-def scrape_url_content(url: str) -> Optional[str]:
+# --- Web Scraping Function (MODIFIED TO BE ASYNC) ---
+# Change: Made function 'async'
+async def scrape_url_content(url: str) -> Optional[str]:
     """
     Fetches a URL and scrapes visible text content from it, using Playwright for dynamic content.
-    Optimized for resource-constrained environments.
+    Optimized for resource-constrained environments and made asynchronous.
     """
-    logging.info(f"Attempting to scrape URL: {url} with Playwright (optimized).")
+    logging.info(f"Attempting to scrape URL: {url} with Playwright (optimized & async).")
 
     parsed_url = urlparse(url)
     if not all([parsed_url.scheme, parsed_url.netloc]):
@@ -56,64 +56,67 @@ def scrape_url_content(url: str) -> Optional[str]:
 
     page_content = None
     try:
-        with sync_playwright() as p:
-            # Use 'args' to limit Chromium's resource usage
-            browser = p.chromium.launch(
+        # Change: Use async_playwright()
+        async with async_playwright() as p:
+            # Change: Await browser launch
+            browser = await p.chromium.launch(
                 headless=True,
                 args=[
-                    '--no-sandbox', # Required for some container environments like Render
+                    '--no-sandbox',
                     '--disable-gpu',
-                    '--single-process', # IMPORTANT: Uses less memory, but might be slower/less stable
-                    '--disable-dev-shm-usage', # Addresses /dev/shm issues in containers
+                    '--single-process',
+                    '--disable-dev-shm-usage',
                     '--disable-setuid-sandbox',
                     '--disable-accelerated-2d-canvas',
                     '--no-zygote'
                 ]
             )
-            page = browser.new_page()
+            # Change: Await new page
+            page = await browser.new_page()
             
-            # Set a smaller viewport for potentially faster rendering
-            page.set_viewport_size({"width": 800, "height": 600}) 
+            # Change: Await set_viewport_size
+            await page.set_viewport_size({"width": 800, "height": 600}) 
 
-            # CORRECTED SYNTAX: Use an explicit function for page.route
-            def handle_route(route):
+            # CORRECTED SYNTAX: Use an explicit async function for page.route
+            async def handle_route(route):
                 if route.request.resource_type in ["image", "media", "font", "stylesheet"]:
-                    route.abort()
+                    await route.abort()
                 else:
-                    # FIX: 'continue' is a Python keyword. Use 'continue_()' method instead.
-                    route.continue_() 
+                    await route.continue_() 
 
-            page.route("**/*", handle_route)
+            # Change: Await page.route
+            await page.route("**/*", handle_route)
 
 
             # Navigate and wait for the network to be idle
-            # Reduced timeout slightly, 'domcontentloaded' is faster
-            page.goto(url, wait_until='domcontentloaded', timeout=45000) 
+            # Change: Await page.goto
+            await page.goto(url, wait_until='domcontentloaded', timeout=45000) 
             
-            # Wait for specific job description elements to appear
             job_desc_selectors = [
-                'div[data-automation-id="jobPostingDescription"]', # Workday
-                'div.jobDetails', # Workday fallback
-                'div[data-ui="job-description"]', # Ashby
-                '.ashby-job-posting__content', # Ashby fallback
-                'div#content', # Greenhouse
-                '.job-description', # General
-                'body' # Absolute fallback
+                'div[data-automation-id="jobPostingDescription"]',
+                'div.jobDetails',
+                'div[data-ui="job-description"]',
+                '.ashby-job-posting__content',
+                'div#content',
+                '.job-description',
+                'body'
             ]
             
             try:
-                # Use | to combine selectors for wait_for_selector
-                page.wait_for_selector(
+                # Change: Await page.wait_for_selector
+                await page.wait_for_selector(
                     "|".join(job_desc_selectors), 
-                    timeout=15000 # Wait up to 15 seconds for content to appear
+                    timeout=15000 
                 )
                 logging.info("Playwright: Job description selector found, content likely rendered.")
             except PlaywrightTimeoutError:
                 logging.warning("Playwright: Job description selector not found within timeout. Proceeding with current content.")
 
 
-            page_content = page.content() # Get the fully rendered HTML
-            browser.close()
+            # Change: Await page.content()
+            page_content = await page.content() 
+            # Change: Await browser.close()
+            await browser.close()
             logging.info(f"Successfully fetched rendered content from {url} with Playwright.")
 
     except PlaywrightTimeoutError as e:
@@ -137,28 +140,28 @@ def scrape_url_content(url: str) -> Optional[str]:
         '.header', '.footer', '.navbar', '.sidebar', '.ad', '.ads', '.cookie-banner',
         '.modal', '.overlay', '.share-buttons', '.social-media', '.pagination',
         '.breadcrumb', '.skip-link', '#skip-link', '#footer', '#header', '#navbar',
-        '.top-card-layout__card', # LinkedIn specific top card
+        '.top-card-layout__card',
         '.sub-nav', '.global-footer', '.sign-in-banner',
-        'svg', 'path', 'circle', 'img', # Ensure all image/vector elements are removed
-        'div[aria-hidden="true"]', # Sometimes used for hidden elements
-        '[role="banner"]', '[role="navigation"]', '[role="contentinfo"]', # ARIA roles
-        '.skip-to-content', '.visually-hidden', # More hidden utility classes
-        '.hidden', '.sr-only' # Even more hidden classes
+        'svg', 'path', 'circle', 'img',
+        'div[aria-hidden="true"]',
+        '[role="banner"]', '[role="navigation"]', '[role="contentinfo"]',
+        '.skip-to-content', '.visually-hidden',
+        '.hidden', '.sr-only'
     ]:
         try:
             if unwanted_tag_selector.startswith('.') or unwanted_tag_selector.startswith('#') or '[' in unwanted_tag_selector:
                 for element in soup.select(unwanted_tag_selector):
                     element.decompose()
-            else: # Assume it's a tag name
+            else:
                 for element in soup.find_all(unwanted_tag_selector):
                     element.decompose()
         except Exception as e:
-            logging.warning(f"Error decomposing selector {unwanted_tag_selector}: {e}") # Non-critical error
+            logging.warning(f"Error decomposing selector {unwanted_tag_selector}: {e}")
 
 
     # Find specific job description containers after rendering.
     content_element = None
-    for selector in job_desc_selectors: # Re-use the list of selectors
+    for selector in job_desc_selectors:
         content_element = soup.select_one(selector)
         if content_element:
             logging.info(f"Final BeautifulSoup: Found job description via selector: {selector}")
@@ -170,15 +173,11 @@ def scrape_url_content(url: str) -> Optional[str]:
     else:
         logging.warning("Final BeautifulSoup: No specific job description element found after Playwright render, attempting full body text.")
         body_text = soup.body.get_text(separator='\n', strip=True) if soup.body else ""
-        extracted_text = body_text # No initial cap here, will truncate later
+        extracted_text = body_text
 
-    # Clean up excessive whitespace and newlines
-    extracted_text = re.sub(r'[\n\r]+', '\n', extracted_text).strip() # Consolidate multiple newlines into single
-    extracted_text = re.sub(r'[ \t]+', ' ', extracted_text).strip() # Consolidate multiple spaces/tabs
+    extracted_text = re.sub(r'[\n\r]+', '\n', extracted_text).strip()
+    extracted_text = re.sub(r'[ \t]+', ' ', extracted_text).strip()
 
-    # Truncate BEFORE sending to Gemini, but also for the Google Sheet cell limit.
-    # We will aim for a limit around 45,000 characters for the *final* string to put in the cell,
-    # as 50,000 is the hard limit.
     max_final_char_limit = 45000 
     if len(extracted_text) > max_final_char_limit:
         logging.warning(f"Final extracted content length ({len(extracted_text)}) exceeds {max_final_char_limit} characters. Truncating for Google Sheet/LLM.")
@@ -193,6 +192,7 @@ def scrape_url_content(url: str) -> Optional[str]:
 
 
 # --- Function: Parse CV Document ---
+# This function is synchronous and does not need changes
 def parse_cv_document(file_path: str) -> Optional[str]:
     """
     Parses a .docx file and extracts its text content.
@@ -225,7 +225,8 @@ def parse_cv_document(file_path: str) -> Optional[str]:
 
 
 # --- Gemini Prompting Functions ---
-def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional[str]) -> Dict[str, any]:
+# Change: Made analyze_job_posting_with_gemini async because it will call async scrape_url_content
+async def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional[str]) -> Dict[str, any]:
     """
     Analyzes job posting and CV content using Gemini AI.
     Returns a structured dictionary of insights.
@@ -249,8 +250,6 @@ def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional
 
     json_generation_config = {
         "response_mime_type": "application/json",
-        # Full schema definition as requested in initial prompt. This helps the model
-        # generate consistent JSON output.
         "response_schema": {
             "type": "OBJECT",
             "properties": {
@@ -288,7 +287,6 @@ def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional
     }
 
 
-    # --- Prompt 1: Extract Core Job Information (Revised for Broader JOB_DESCRIPTION) ---
     prompt1_extraction = f"""
     As a highly skilled information extraction specialist for job postings, your task is to analyze the provided job offer text.
 
@@ -325,7 +323,6 @@ def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional
     logging.info("Sending Prompt 1: Core Job Information Extraction (REVISED FOR BROADER JOB_DESCRIPTION)...")
     job_title, company, location, job_description_extracted = "N/A", "N/A", "N/A", "N/A"
     try:
-        # Pass the full schema to generation_config for prompt 1
         response1 = model.generate_content(
             prompt1_extraction,
             generation_config=json_generation_config # Use the full schema
@@ -338,7 +335,6 @@ def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional
         logging.info(f"Prompt 1 successful. Job Title: {job_title}, Company: {company}")
     except json.JSONDecodeError as e:
         logging.error(f"Error parsing JSON from Prompt 1: {e}. Raw response: '{response1.text}'")
-        # Added more robust markdown wrapper removal
         cleaned_text = response1.text.strip()
         if cleaned_text.startswith("```json") and cleaned_text.endswith("```"):
             cleaned_text = cleaned_text[len("```json"): -len("```")].strip()
@@ -357,11 +353,9 @@ def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional
         logging.error(f"Error during Prompt 1 execution: {e}", exc_info=True)
         logging.error("Failed to extract core job details, proceeding with N/A values.")
 
-    # Use the extracted job_description_extracted for subsequent prompts if valid, otherwise use original content
     job_description_for_prompts = job_description_extracted if job_description_extracted != "N/A" and job_description_extracted.strip() else content
 
 
-    # --- Guard Clause: If job_description is not available, cannot generate further ---
     if job_description_for_prompts == "N/A" or not job_description_for_prompts.strip():
         logging.warning("Job Description is not available or empty. Skipping generation prompts.")
         return {
@@ -378,7 +372,6 @@ def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional
             "QUESTIONS_TO_ASK": [] # Changed: Default to empty list
         }
 
-    # Prepare CV content for prompts
     cv_context = ""
     if cv_content:
         cv_context = f"\n\nMy CV Content:\n---\n{cv_content}\n---\n"
@@ -387,8 +380,12 @@ def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional
         logging.warning("No CV content provided or parsed for generation prompts. Results may be less personalized.")
 
 
-    # --- NEW Prompt: Identify Biggest Challenge and Root Cause ---
-    # Changed: Removed individual schema as full schema is in json_generation_config
+    challenge_json_schema = {
+        "type": "OBJECT",
+        "properties": {
+            "CHALLENGE_AND_ROOT_CAUSE": {"type": "STRING"}
+        }
+    }
     prompt_challenge_and_root_cause = f"""
     Based solely on the job description provided, what is the biggest challenge someone in this "{job_title}" position at "{company}" would face day-to-day?
     After identifying the challenge, give me the root cause of this specific issue.
@@ -418,8 +415,12 @@ def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional
         logging.error(f"Error during Challenge Prompt execution: {e}", exc_info=True)
 
 
-    # --- NEW Prompt: Generate Cover Letter Hook ---
-    # Changed: Removed individual schema as full schema is in json_generation_config
+    hook_json_schema = {
+        "type": "OBJECT",
+        "properties": {
+            "COVER_LETTER_HOOK": {"type": "STRING"}
+        }
+    }
     prompt_cover_letter_hook = f"""
     You're applying for this "{job_title}" position at "{company}".
 
