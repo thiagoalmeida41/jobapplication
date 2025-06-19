@@ -1,17 +1,11 @@
-import requests
-from bs4 import BeautifulSoup
 import logging
-import re
-from urllib.parse import urlparse
-import google.generativeai as genai
 import os
 import json
 from docx import Document
 from docx.opc.exceptions import OpcError
 from typing import Optional, List, Dict
 
-# --- Playwright Imports ---
-from playwright.async_api import async_playwright, Playwright, TimeoutError as PlaywrightTimeoutError
+import google.generativeai as genai
 
 # --- Logging Configuration ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -39,145 +33,7 @@ except Exception as e:
     raise RuntimeError(f"Failed to initialize Gemini model: {e}")
 
 
-# --- Web Scraping Function (WITH EXPLICIT EXECUTABLE PATH) ---
-async def scrape_url_content(url: str) -> Optional[str]:
-    """
-    Fetches a URL and scrapes visible text content from it, using Playwright for dynamic content.
-    Optimized for resource-constrained environments and made asynchronous.
-    """
-    logging.info(f"Attempting to scrape URL: {url} with Playwright (optimized & async).")
-
-    parsed_url = urlparse(url)
-    if not all([parsed_url.scheme, parsed_url.netloc]):
-        logging.error(f"Invalid URL format: {url}. Please provide a complete URL including scheme (e.g., 'https://').")
-        return None
-
-    page_content = None
-    try:
-        async with async_playwright() as p:
-            # FIX: Specify the executable_path to the system-installed Chromium
-            browser = await p.chromium.launch(
-                headless=True,
-                executable_path="/usr/bin/chromium-browser", # <--- ADD THIS LINE
-                args=[
-                    '--no-sandbox', # Required for some container environments like Render
-                    '--disable-gpu',
-                    '--single-process', # IMPORTANT: Uses less memory, but might be slower/less stable
-                    '--disable-dev-shm-usage', # Addresses /dev/shm issues in containers
-                    '--disable-setuid-sandbox',
-                    '--disable-accelerated-2d-canvas',
-                    '--no-zygote'
-                ]
-            )
-            page = await browser.new_page()
-            
-            await page.set_viewport_size({"width": 800, "height": 600}) 
-
-            def handle_route(route):
-                if route.request.resource_type in ["image", "media", "font", "stylesheet"]:
-                    route.abort()
-                else:
-                    route.continue_() 
-
-            await page.route("**/*", handle_route)
-
-
-            await page.goto(url, wait_until='domcontentloaded', timeout=45000) 
-            
-            job_desc_selectors = [
-                'div[data-automation-id="jobPostingDescription"]', # Workday
-                'div.jobDetails', # Workday fallback
-                'div[data-ui="job-description"]', # Ashby
-                '.ashby-job-posting__content', # Ashby fallback
-                'div#content', # Greenhouse
-                '.job-description', # General
-                'body' # Absolute fallback
-            ]
-            
-            try:
-                await page.wait_for_selector(
-                    "|".join(job_desc_selectors), 
-                    timeout=15000 
-                )
-                logging.info("Playwright: Job description selector found, content likely rendered.")
-            except PlaywrightTimeoutError:
-                logging.warning("Playwright: Job description selector not found within timeout. Proceeding with current content.")
-
-
-            page_content = await page.content() 
-            await browser.close()
-            logging.info(f"Successfully fetched rendered content from {url} with Playwright.")
-
-    except PlaywrightTimeoutError as e:
-        logging.error(f"Playwright navigation/wait timed out for {url}: {e}")
-        return None
-    except Exception as e:
-        logging.error(f"An unexpected Playwright error occurred during scraping {url}: {e}", exc_info=True)
-        return None
-
-    if not page_content:
-        logging.error(f"Playwright returned empty content for {url}.")
-        return None
-
-    soup = BeautifulSoup(page_content, 'html.parser')
-
-    for unwanted_tag_selector in [
-        'script', 'style', 'header', 'footer', 'nav', 'aside', 'form', 'button',
-        'img', 'svg', 'iframe', 'noscript', 'meta', 'link', 'title', 'head',
-        '.header', '.footer', '.navbar', '.sidebar', '.ad', '.ads', '.cookie-banner',
-        '.modal', '.overlay', '.share-buttons', '.social-media', '.pagination',
-        '.breadcrumb', '.skip-link', '#skip-link', '#footer', '#header', '#navbar',
-        '.top-card-layout__card',
-        '.sub-nav', '.global-footer', '.sign-in-banner',
-        'svg', 'path', 'circle', 'img',
-        'div[aria-hidden="true"]',
-        '[role="banner"]', '[role="navigation"]', '[role="contentinfo"]',
-        '.skip-to-content', '.visually-hidden',
-        '.hidden', '.sr-only'
-    ]:
-        try:
-            if unwanted_tag_selector.startswith('.') or unwanted_tag_selector.startswith('#') or '[' in unwanted_tag_selector:
-                for element in soup.select(unwanted_tag_selector):
-                    element.decompose()
-            else:
-                for element in soup.find_all(unwanted_tag_selector):
-                    element.decompose()
-        except Exception as e:
-            logging.warning(f"Error decomposing selector {unwanted_tag_selector}: {e}")
-
-
-    content_element = None
-    for selector in job_desc_selectors:
-        content_element = soup.select_one(selector)
-        if content_element:
-            logging.info(f"Final BeautifulSoup: Found job description via selector: {selector}")
-            break
-
-    extracted_text = ""
-    if content_element:
-        extracted_text = content_element.get_text(separator='\n', strip=True)
-    else:
-        logging.warning("Final BeautifulSoup: No specific job description element found after Playwright render, attempting full body text.")
-        body_text = soup.body.get_text(separator='\n', strip=True) if soup.body else ""
-        extracted_text = body_text
-
-    extracted_text = re.sub(r'[\n\r]+', '\n', extracted_text).strip()
-    extracted_text = re.sub(r'[ \t]+', ' ', extracted_text).strip()
-
-    max_final_char_limit = 45000 
-    if len(extracted_text) > max_final_char_limit:
-        logging.warning(f"Final extracted content length ({len(extracted_text)}) exceeds {max_final_char_limit} characters. Truncating for Google Sheet/LLM.")
-        extracted_text = extracted_text[:(max_final_char_limit - 100)] + "\n\n[CONTENT TRUNCATED DUE TO LENGTH LIMITS]..."
-
-    if not extracted_text:
-        logging.error(f"No meaningful text extracted from {url} after Playwright and BeautifulSoup processing.")
-        return None
-
-    logging.info(f"Successfully scraped and processed content from {url}. Length: {len(extracted_text)} characters.")
-    return extracted_text
-
-
-# --- Function: Parse CV Document ---
+# --- Function: Parse CV Document (Synchronous) ---
 def parse_cv_document(file_path: str) -> Optional[str]:
     """
     Parses a .docx file and extracts its text content.
@@ -209,7 +65,7 @@ def parse_cv_document(file_path: str) -> Optional[str]:
         return None
 
 
-# --- Gemini Prompting Functions ---
+# --- Gemini Prompting Functions (Asynchronous, but doesn't call Playwright anymore) ---
 async def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional[str]) -> Dict[str, any]:
     """
     Analyzes job posting and CV content using Gemini AI.
@@ -319,7 +175,6 @@ async def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Op
         logging.info(f"Prompt 1 successful. Job Title: {job_title}, Company: {company}")
     except json.JSONDecodeError as e:
         logging.error(f"Error parsing JSON from Prompt 1: {e}. Raw response: '{response1.text}'")
-        # Added more robust markdown wrapper removal
         cleaned_text = response1.text.strip()
         if cleaned_text.startswith("```json") and cleaned_text.endswith("```"):
             cleaned_text = cleaned_text[len("```json"): -len("```")].strip()
@@ -397,7 +252,7 @@ async def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Op
     except json.JSONDecodeError as e:
         logging.error(f"Error parsing JSON from Challenge Prompt: {e}. Raw response: '{response_challenge.text}'")
     except Exception as e:
-        logging.error(f"Error during Challenge Prompt execution: {e}", exc_info=True)
+        logging.error(f"Error during Prompt 3 execution: {e}", exc_info=True)
 
 
     hook_json_schema = {
@@ -438,85 +293,6 @@ async def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Op
         logging.info("NEW Prompt successful. Cover Letter Hook generated.")
     except json.JSONDecodeError as e:
         logging.error(f"Error parsing JSON from Hook Prompt: {e}. Raw response: '{response_hook.text}'")
-    except Exception as e:
-        logging.error(f"Error during Hook Prompt execution: {e}", exc_info=True)
-
-
-    # --- MODIFIED Prompt 2: Generate Full Cover Letter Draft ---
-    # Changed: Removed individual schema as full schema is in json_generation_config
-    prompt2_cover_letter = f"""
-    You are writing a cover letter applying for the "{job_title}" role at "{company}".
-    Here's what you have so far, keep this word for word:
-    {cover_letter_hook}
-
-    Finish writing the cover letter based on your resume and keep the *entire* cover letter (including the hook) within 250 words.
-    Focus on connecting your skills and experiences directly to the job description, elaborating on how your background makes you an ideal candidate.
-    Do NOT include salutation, closing, or placeholders like "[Your Name]". Focus on the content of the letter.
-
-    {cv_context}
-    Respond strictly in JSON format, conforming to the main schema's "COVER_LETTER" property.
-
-    Job Title: {job_title}
-    Company: {company}
-    Job Description:
-    ---
-    {job_description_for_prompts}
-    ---
-    """
-    logging.info("Sending MODIFIED Prompt 2: Generate Full Cover Letter Draft...")
-    cover_letter = "N/A"
-    try:
-        response2 = model.generate_content(
-            prompt2_cover_letter,
-            generation_config=json_generation_config # Use the full schema
-        )
-        parsed_data = json.loads(response2.text)
-        cover_letter = parsed_data.get("COVER_LETTER", "N/A")
-        logging.info("Prompt 2 successful. Cover Letter generated.")
-    except json.JSONDecodeError as e:
-        logging.error(f"Error parsing JSON from Prompt 2: {e}. Raw response: '{response2.text}'")
-    except Exception as e:
-        logging.error(f"Error during Prompt 2 execution: {e}", exc_info=True)
-
-
-    # --- Prompt 3: Generate "Tell Me About Yourself" Response (UPDATED) ---
-    # Changed: Removed individual schema as full schema is in json_generation_config
-    prompt3_tell_me_about_yourself = f"""
-    You are a career coach. Based *strictly* on the experiences and qualifications provided in the CV content, and the job description, draft a concise and compelling "Tell me about yourself" response (around 100-150 words).
-
-    Your response must:
-    -   **ONLY** use information explicitly mentioned in the provided CV content. Do NOT make up any details or experiences.
-    -   Directly connect the candidate's background from the CV to how they can successfully address or contribute to solving the biggest challenge of the role identified as: "{challenge_and_root_cause}".
-    -   Structure it like a brief story: present, past, future, *as supported by the CV*.
-
-    If the CV does not contain information directly relevant to the identified challenge, generate a general "Tell Me About Yourself" response based on the CV and job description, clearly stating that direct connection to the challenge isn't evident in the provided CV.
-
-    Respond strictly in JSON format, conforming to the main schema's "TELL_ME_ABOUT_YOURSELF" property.
-
-    Job Title: {job_title}
-    Company: {company}
-    Job Description:
-    ---
-    {job_description_for_prompts}
-    ---
-    My CV Content:
-    ---
-    {cv_content if cv_content else 'No CV content provided.'}
-    ---
-    Challenge and Root Cause for this role: {challenge_and_root_cause}
-    """
-    logging.info("Sending Prompt 3: Tell Me About Yourself (UPDATED)...")
-    tell_me_about_yourself = "N/A"
-    try:
-        response3 = model.generate_content(
-            prompt3_tell_me_about_yourself,
-            generation_config=json_generation_config # Use the full schema
-        )
-        parsed_data = json.loads(response3.text)
-        tell_me_about_yourself = parsed_data.get("TELL_ME_ABOUT_YOURSELF", "N/A")
-        logging.info("Prompt 3 successful. 'Tell Me About Yourself' generated.")
-    except json.JSONDecodeError as e:
-        logging.error(f"Error parsing JSON from Prompt 3: {e}. Raw response: '{response3.text}'")
     except Exception as e:
         logging.error(f"Error during Prompt 3 execution: {e}", exc_info=True)
 
@@ -626,7 +402,7 @@ async def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Op
     final_result = {
         "JOB_TITLE": job_title,
         "COMPANY": company,
-        "URL": url,
+        "URL": url, # Use the LLM-extracted URL as it might be cleaner than input URL
         "LOCATION": location,
         "JOB_DESCRIPTION": job_description_extracted, # Use the LLM-extracted description
         "CHALLENGE_AND_ROOT_CAUSE": challenge_and_root_cause,
@@ -658,7 +434,7 @@ if __name__ == "__main__":
 
     print(f"\n--- Starting job posting analysis for: {test_url} ---")
 
-    scraped_content = scrape_url_content(test_url)
+    scraped_content = scrape_url_content(test_url) # Removed await for sync main block
 
     if scraped_content:
         print("\n--- RAW SCRAPED CONTENT (for review): ---")
@@ -666,7 +442,7 @@ if __name__ == "__main__":
         print("\n--- END OF RAW SCRAPED CONTENT ---")
 
         print("\n--- Content Scraped successfully. Analyzing with Gemini... ---")
-        analysis_result = analyze_job_posting_with_gemini(scraped_content, test_url, cv_content)
+        analysis_result = analyze_job_posting_with_gemini(scraped_content, test_url, cv_content) # Removed await for sync main block
 
         print("\n--- Final Structured Analysis Result: ---")
         print(json.dumps(analysis_result, indent=4, ensure_ascii=False))
