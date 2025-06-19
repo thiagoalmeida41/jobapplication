@@ -8,57 +8,6 @@ import os
 import json
 from docx import Document
 from docx.opc.exceptions import OpcError
-from typing import Optional, List, Dict # Added for type hinting clarity
-
-# --- Logging Configuration ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-# --- Gemini API Configuration ---
-# Use GOOGLE_API_KEY as per your existing code.
-# Change: Replaced exit() with raising an exception so FastAPI can catch it.
-# This prevents the Render service from crashing on startup if the key is missing.
-try:
-    gemini_api_key = os.getenv("GOOGLE_API_KEY")
-    if not gemini_api_key:
-        raise ValueError("GOOGLE_API_KEY environment variable not set.")
-    genai.configure(api_key=gemini_api_key)
-    logging.info("Gemini API key loaded from environment variable.")
-except ValueError as e:
-    logging.error(f"Configuration error: {e}")
-    # In a deployed FastAPI app, raising a RuntimeError here allows the server to start
-    # but requests using the model will fail, which is better than a hard exit.
-    # The analyze_job_posting_with_gemini function will also handle this if genai.configure fails.
-    raise RuntimeError(f"Gemini API configuration failed: {e}. Please ensure GOOGLE_API_KEY is set.")
-except Exception as e:
-    logging.error(f"An unexpected error occurred during Gemini API configuration: {e}", exc_info=True)
-    raise RuntimeError(f"Gemini API configuration failed unexpectedly: {e}")
-
-
-# Initialize the Gemini model globally
-# 'gemini-1.5-flash' is a good balance of speed and capability for many tasks.
-# You could use 'gemini-1.5-pro' for more complex reasoning, but it might be slower/pricier.
-try:
-    model = genai.GenerativeModel('gemini-1.5-flash')
-    # Test a small call to ensure model is accessible (optional, can be slow on startup)
-    # response = model.generate_content("ping", safety_settings={'HARASSMENT': 'BLOCK_NONE'})
-    # logging.info(f"Gemini model initialized successfully: {response.text.strip()}")
-except Exception as e:
-    logging.error(f"Failed to initialize Gemini model 'gemini-1.5-flash': {e}", exc_info=True)
-    # Re-raise to ensure the app doesn't start if the model can't be loaded
-    raise RuntimeError(f"Failed to initialize Gemini model: {e}")
-
-
-# --- Web Scraping Function ---
-import requests
-from bs4 import BeautifulSoup
-import logging
-import re
-from urllib.parse import urlparse
-import google.generativeai as genai
-import os
-import json
-from docx import Document
-from docx.opc.exceptions import OpcError
 from typing import Optional, List, Dict
 
 # --- Playwright Imports ---
@@ -76,6 +25,7 @@ try:
     logging.info("Gemini API key loaded from environment variable.")
 except ValueError as e:
     logging.error(f"Configuration error: {e}")
+    # Raise a RuntimeError so FastAPI can catch it and log properly without crashing completely
     raise RuntimeError(f"Gemini API configuration failed: {e}. Please ensure GOOGLE_API_KEY is set.")
 except Exception as e:
     logging.error(f"An unexpected error occurred during Gemini API configuration: {e}", exc_info=True)
@@ -84,56 +34,14 @@ except Exception as e:
 
 # Initialize the Gemini model globally
 try:
+    # Use 'gemini-1.5-flash' as per your original code.
     model = genai.GenerativeModel('gemini-1.5-flash')
 except Exception as e:
     logging.error(f"Failed to initialize Gemini model 'gemini-1.5-flash': {e}", exc_info=True)
     raise RuntimeError(f"Failed to initialize Gemini model: {e}")
 
 
-# --- Web Scraping Function (MODIFIED FOR PLAYWRIGHT) ---
-import requests
-from bs4 import BeautifulSoup
-import logging
-import re
-from urllib.parse import urlparse
-import google.generativeai as genai
-import os
-import json
-from docx import Document
-from docx.opc.exceptions import OpcError
-from typing import Optional, List, Dict
-
-# --- Playwright Imports ---
-# Change: Explicitly import sync_playwright for clarity
-from playwright.sync_api import sync_playwright, Playwright, TimeoutError as PlaywrightTimeoutError
-
-# --- Logging Configuration ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-# --- Gemini API Configuration ---
-try:
-    gemini_api_key = os.getenv("GOOGLE_API_KEY")
-    if not gemini_api_key:
-        raise ValueError("GOOGLE_API_KEY environment variable not set.")
-    genai.configure(api_key=gemini_api_key)
-    logging.info("Gemini API key loaded from environment variable.")
-except ValueError as e:
-    logging.error(f"Configuration error: {e}")
-    raise RuntimeError(f"Gemini API configuration failed: {e}. Please ensure GOOGLE_API_KEY is set.")
-except Exception as e:
-    logging.error(f"An unexpected error occurred during Gemini API configuration: {e}", exc_info=True)
-    raise RuntimeError(f"Gemini API configuration failed unexpectedly: {e}")
-
-
-# Initialize the Gemini model globally
-try:
-    model = genai.GenerativeModel('gemini-1.5-flash')
-except Exception as e:
-    logging.error(f"Failed to initialize Gemini model 'gemini-1.5-flash': {e}", exc_info=True)
-    raise RuntimeError(f"Failed to initialize Gemini model: {e}")
-
-
-# --- Web Scraping Function (OPTIMIZED FOR RENDER/FREE TIERS) ---
+# --- Web Scraping Function (FINAL PLAYWRIGHT SYNTAX FIX) ---
 def scrape_url_content(url: str) -> Optional[str]:
     """
     Fetches a URL and scrapes visible text content from it, using Playwright for dynamic content.
@@ -149,7 +57,7 @@ def scrape_url_content(url: str) -> Optional[str]:
     page_content = None
     try:
         with sync_playwright() as p:
-            # Change: Use 'args' to limit Chromium's resource usage
+            # Use 'args' to limit Chromium's resource usage
             browser = p.chromium.launch(
                 headless=True,
                 args=[
@@ -164,22 +72,25 @@ def scrape_url_content(url: str) -> Optional[str]:
             )
             page = browser.new_page()
             
-            # Change: Set a smaller viewport for potentially faster rendering
+            # Set a smaller viewport for potentially faster rendering
             page.set_viewport_size({"width": 800, "height": 600}) 
 
-            # Change: Block unnecessary resources (images, fonts, media) to save bandwidth and memory
-            page.route("**/*", lambda route: (
-                route.abort()
-                if route.request.resource_type in ["image", "media", "font", "stylesheet"] # Block stylesheets too
-                else route.continue()
-            ))
+            # CORRECTED SYNTAX: Use an explicit function for page.route
+            def handle_route(route):
+                if route.request.resource_type in ["image", "media", "font", "stylesheet"]:
+                    route.abort()
+                else:
+                    # FIX: 'continue' is a Python keyword. Use 'continue_()' method instead.
+                    route.continue_() 
+
+            page.route("**/*", handle_route)
+
 
             # Navigate and wait for the network to be idle
-            page.goto(url, wait_until='domcontentloaded', timeout=45000) # Reduced timeout slightly, 'domcontentloaded' is faster
+            # Reduced timeout slightly, 'domcontentloaded' is faster
+            page.goto(url, wait_until='domcontentloaded', timeout=45000) 
             
-            # Change: wait_for_selector for common job description elements (more robust than just timeout)
-            # This makes sure the JS has rendered *something* before scraping.
-            # Add more selectors if specific sites are problematic.
+            # Wait for specific job description elements to appear
             job_desc_selectors = [
                 'div[data-automation-id="jobPostingDescription"]', # Workday
                 'div.jobDetails', # Workday fallback
@@ -190,10 +101,10 @@ def scrape_url_content(url: str) -> Optional[str]:
                 'body' # Absolute fallback
             ]
             
-            # Try to wait for any of the main content elements
             try:
+                # Use | to combine selectors for wait_for_selector
                 page.wait_for_selector(
-                    "|".join(job_desc_selectors), # Use | to combine selectors
+                    "|".join(job_desc_selectors), 
                     timeout=15000 # Wait up to 15 seconds for content to appear
                 )
                 logging.info("Playwright: Job description selector found, content likely rendered.")
@@ -231,8 +142,8 @@ def scrape_url_content(url: str) -> Optional[str]:
         'svg', 'path', 'circle', 'img', # Ensure all image/vector elements are removed
         'div[aria-hidden="true"]', # Sometimes used for hidden elements
         '[role="banner"]', '[role="navigation"]', '[role="contentinfo"]', # ARIA roles
-        '.skip-to-content', '.visually-hidden', # Hidden utility classes
-        '.hidden', '.sr-only' # More hidden classes
+        '.skip-to-content', '.visually-hidden', # More hidden utility classes
+        '.hidden', '.sr-only' # Even more hidden classes
     ]:
         try:
             if unwanted_tag_selector.startswith('.') or unwanted_tag_selector.startswith('#') or '[' in unwanted_tag_selector:
@@ -257,7 +168,7 @@ def scrape_url_content(url: str) -> Optional[str]:
     if content_element:
         extracted_text = content_element.get_text(separator='\n', strip=True)
     else:
-        logging.warning("Final BeautifulSoup: No specific job description element found, attempting full body text.")
+        logging.warning("Final BeautifulSoup: No specific job description element found after Playwright render, attempting full body text.")
         body_text = soup.body.get_text(separator='\n', strip=True) if soup.body else ""
         extracted_text = body_text # No initial cap here, will truncate later
 
@@ -265,8 +176,7 @@ def scrape_url_content(url: str) -> Optional[str]:
     extracted_text = re.sub(r'[\n\r]+', '\n', extracted_text).strip() # Consolidate multiple newlines into single
     extracted_text = re.sub(r'[ \t]+', ' ', extracted_text).strip() # Consolidate multiple spaces/tabs
 
-    # Change: Truncate BEFORE sending to Gemini, but also for the Google Sheet cell limit.
-    # Keep the original 15000 character limit for LLM, but also ensure it's not too big for cell.
+    # Truncate BEFORE sending to Gemini, but also for the Google Sheet cell limit.
     # We will aim for a limit around 45,000 characters for the *final* string to put in the cell,
     # as 50,000 is the hard limit.
     max_final_char_limit = 45000 
@@ -283,96 +193,9 @@ def scrape_url_content(url: str) -> Optional[str]:
 
 
 # --- Function: Parse CV Document ---
-# ... (this function remains the same as your original)
-def parse_cv_document(file_path: str) -> Optional[str]:
-    # ... (your original parse_cv_document code)
-    if not os.path.exists(file_path):
-        logging.error(f"CV file not found at: {file_path}")
-        return None
-
-    if not file_path.lower().endswith('.docx'):
-        logging.warning(f"Unsupported file format for CV: {os.path.basename(file_path)}. "
-                         "Only .docx files are directly supported by this parser. "
-                         "Please convert your CV to .docx format or provide a .docx file.")
-        return None
-
-    try:
-        doc = Document(file_path)
-        full_text = []
-        for para in doc.paragraphs:
-            full_text.append(para.text)
-        cv_content = "\n".join(full_text).strip()
-        logging.info(f"Successfully parsed CV from {file_path}. Length: {len(cv_content)} characters.")
-        return cv_content
-    except OpcError as e:
-        logging.error(f"Error opening or reading .docx file {file_path}: {e}. "
-                      "It might be corrupted or not a valid .docx file.")
-        return None
-    except Exception as e:
-        logging.error(f"An unexpected error occurred while parsing CV {file_path}: {e}", exc_info=True)
-        return None
-
-
-# --- Gemini Prompting Functions ---
-# ... (this function remains the same as your original, but it will receive truncated job_content)
-def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional[str]) -> Dict[str, any]:
-    # ... (your original analyze_job_posting_with_gemini code)
-    # Ensure your prompts now refer to the potentially truncated 'content' for job_description
-    # and that the 'JOB_DESCRIPTION' in the final_result uses the truncated 'content'.
-    # Example:
-    final_result = {
-        "JOB_TITLE": "N/A", "COMPANY": "N/A", "URL": url, "LOCATION": "N/A",
-        "JOB_DESCRIPTION": content, # Use the potentially truncated content here
-        "CHALLENGE_AND_ROOT_CAUSE": "N/A",
-        "COVER_LETTER_HOOK": "N/A", "COVER_LETTER": "N/A",
-        "TELL_ME_ABOUT_YOURSELF": "N/A", "MAIN_CHANGES_TO_MY_CV": [],
-        "QUESTIONS_TO_ASK": []
-    }
-    # ... (rest of the function)
-
-# --- Main Execution Block ---
-# ... (this block remains the same as your original)
-if __name__ == "__main__":
-    # ... (your original __main__ block)
-    test_url = input("Enter the URL of the job posting to analyze: ")
-    if not test_url.startswith('http'):
-        print("Please enter a full URL starting with http:// or https://")
-        exit()
-
-    cv_file_path = input("Enter the full path to your CV file (e.g., C:\\Users\\You\\Documents\\MyCV.docx) (leave blank to skip CV analysis): ")
-
-    cv_content = None
-    if cv_file_path:
-        cv_content = parse_cv_document(cv_file_path)
-        if cv_content is None:
-            print(f"Failed to parse CV from '{cv_file_path}'. Analysis will proceed without CV content.")
-
-    print(f"\n--- Starting job posting analysis for: {test_url} ---")
-
-    scraped_content = scrape_url_content(test_url)
-
-    if scraped_content:
-        print("\n--- RAW SCRAPED CONTENT (for review): ---")
-        print(scraped_content)
-        print("\n--- END OF RAW SCRAPED CONTENT ---")
-
-        print("\n--- Content Scraped successfully. Analyzing with Gemini... ---")
-        analysis_result = analyze_job_posting_with_gemini(scraped_content, test_url, cv_content)
-
-        print("\n--- Final Structured Analysis Result: ---")
-        print(json.dumps(analysis_result, indent=4, ensure_ascii=False))
-    else:
-        print("\n--- Failed to scrape job posting content. Cannot proceed with Gemini analysis. ---")
-
-
-
-
-# --- Function: Parse CV Document ---
 def parse_cv_document(file_path: str) -> Optional[str]:
     """
     Parses a .docx file and extracts its text content.
-    Note: This function specifically handles .docx files.
-    Older .doc files require different libraries or external tools.
     """
     if not os.path.exists(file_path):
         logging.error(f"CV file not found at: {file_path}")
@@ -400,23 +223,13 @@ def parse_cv_document(file_path: str) -> Optional[str]:
         logging.error(f"An unexpected error occurred while parsing CV {file_path}: {e}", exc_info=True)
         return None
 
-# --- Gemini Prompting Functions ---
 
+# --- Gemini Prompting Functions ---
 def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional[str]) -> Dict[str, any]:
     """
-    Orchestrates a series of Gemini API calls to analyze a job posting
-    and generate application-related content, now using CV content.
-
-    Args:
-        content (str): The scraped text content from the job posting URL.
-        url (str): The original URL of the job posting.
-        cv_content (str | None): The text content of the user's CV, or None if not provided.
-
-    Returns:
-        dict: A dictionary containing the structured job analysis and
-              generated application content.
+    Analyzes job posting and CV content using Gemini AI.
+    Returns a structured dictionary of insights.
     """
-    # Changed: Ensure a default empty dict for final_result in case of early return/failure
     final_result = {
         "JOB_TITLE": "N/A", "COMPANY": "N/A", "URL": url, "LOCATION": "N/A",
         "JOB_DESCRIPTION": "N/A", "CHALLENGE_AND_ROOT_CAUSE": "N/A",
@@ -434,21 +247,43 @@ def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional
         final_result["QUESTIONS_TO_ASK"] = ["N/A (No content)"]
         return final_result
 
-
-    # Define a common generation configuration for JSON output
-    # Change: Added response_schema for more robust structured output
     json_generation_config = {
         "response_mime_type": "application/json",
-        "response_schema": { # Example schema, refine as needed per prompt output
+        # Full schema definition as requested in initial prompt. This helps the model
+        # generate consistent JSON output.
+        "response_schema": {
             "type": "OBJECT",
             "properties": {
                 "JOB_TITLE": {"type": "STRING"},
                 "COMPANY": {"type": "STRING"},
+                "URL": {"type": "STRING"},
                 "LOCATION": {"type": "STRING"},
                 "JOB_DESCRIPTION": {"type": "STRING"},
-                # Add other properties as they appear in the JSON output
-                # This ensures the model tries to conform
-            }
+                "CHALLENGE_AND_ROOT_CAUSE": {"type": "STRING"},
+                "COVER_LETTER_HOOK": {"type": "STRING"},
+                "COVER_LETTER": {"type": "STRING"},
+                "TELL_ME_ABOUT_YOURSELF": {"type": "STRING"},
+                "MAIN_CHANGES_TO_MY_CV": {
+                    "type": "ARRAY",
+                    "items": {
+                        "type": "OBJECT",
+                        "properties": {
+                            "original_cv_text": {"type": "STRING"},
+                            "proposed_update": {"type": "STRING"}
+                        },
+                        "required": ["original_cv_text", "proposed_update"]
+                    }
+                },
+                "QUESTIONS_TO_ASK": {
+                    "type": "ARRAY",
+                    "items": {"type": "STRING"}
+                }
+            },
+            "required": [
+                "JOB_TITLE", "COMPANY", "URL", "LOCATION", "JOB_DESCRIPTION",
+                "CHALLENGE_AND_ROOT_CAUSE", "COVER_LETTER_HOOK", "COVER_LETTER",
+                "TELL_ME_ABOUT_YOURSELF", "MAIN_CHANGES_TO_MY_CV", "QUESTIONS_TO_ASK"
+            ]
         }
     }
 
@@ -488,17 +323,18 @@ def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional
     ---
     """
     logging.info("Sending Prompt 1: Core Job Information Extraction (REVISED FOR BROADER JOB_DESCRIPTION)...")
-    job_title, company, location, job_description_extracted = "N/A", "N/A", "N/A", "N/A" # Renamed to avoid conflict
+    job_title, company, location, job_description_extracted = "N/A", "N/A", "N/A", "N/A"
     try:
+        # Pass the full schema to generation_config for prompt 1
         response1 = model.generate_content(
             prompt1_extraction,
-            generation_config=json_generation_config
+            generation_config=json_generation_config # Use the full schema
         )
         parsed_data = json.loads(response1.text)
         job_title = parsed_data.get("JOB_TITLE", "N/A")
         company = parsed_data.get("COMPANY", "N/A")
         location = parsed_data.get("LOCATION", "N/A")
-        job_description_extracted = parsed_data.get("JOB_DESCRIPTION", "N/A") # Renamed
+        job_description_extracted = parsed_data.get("JOB_DESCRIPTION", "N/A")
         logging.info(f"Prompt 1 successful. Job Title: {job_title}, Company: {company}")
     except json.JSONDecodeError as e:
         logging.error(f"Error parsing JSON from Prompt 1: {e}. Raw response: '{response1.text}'")
@@ -511,7 +347,7 @@ def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional
                 job_title = parsed_data.get("JOB_TITLE", "N/A")
                 company = parsed_data.get("COMPANY", "N/A")
                 location = parsed_data.get("LOCATION", "N/A")
-                job_description_extracted = parsed_data.get("JOB_DESCRIPTION", "N/A") # Renamed
+                job_description_extracted = parsed_data.get("JOB_DESCRIPTION", "N/A")
                 logging.warning("Recovered from Markdown wrapper in Prompt 1 response.")
             except json.JSONDecodeError:
                 logging.error("Failed to recover from Markdown wrapper.")
@@ -552,21 +388,12 @@ def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional
 
 
     # --- NEW Prompt: Identify Biggest Challenge and Root Cause ---
-    # Changed: Added schema to generation_config for this prompt
-    challenge_json_schema = {
-        "type": "OBJECT",
-        "properties": {
-            "CHALLENGE_AND_ROOT_CAUSE": {"type": "STRING"}
-        }
-    }
+    # Changed: Removed individual schema as full schema is in json_generation_config
     prompt_challenge_and_root_cause = f"""
     Based solely on the job description provided, what is the biggest challenge someone in this "{job_title}" position at "{company}" would face day-to-day?
     After identifying the challenge, give me the root cause of this specific issue.
 
-    Respond strictly in JSON format, conforming to this schema:
-    {{
-        "CHALLENGE_AND_ROOT_CAUSE": "string"
-    }}
+    Respond strictly in JSON format, conforming to the main schema's "CHALLENGE_AND_ROOT_CAUSE" property.
 
     Job Title: {job_title}
     Company: {company}
@@ -580,7 +407,7 @@ def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional
     try:
         response_challenge = model.generate_content(
             prompt_challenge_and_root_cause,
-            generation_config={"response_mime_type": "application/json", "response_schema": challenge_json_schema}
+            generation_config=json_generation_config # Use the full schema
         )
         parsed_data = json.loads(response_challenge.text)
         challenge_and_root_cause = parsed_data.get("CHALLENGE_AND_ROOT_CAUSE", "N/A")
@@ -592,13 +419,7 @@ def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional
 
 
     # --- NEW Prompt: Generate Cover Letter Hook ---
-    # Changed: Added schema to generation_config for this prompt
-    hook_json_schema = {
-        "type": "OBJECT",
-        "properties": {
-            "COVER_LETTER_HOOK": {"type": "STRING"}
-        }
-    }
+    # Changed: Removed individual schema as full schema is in json_generation_config
     prompt_cover_letter_hook = f"""
     You're applying for this "{job_title}" position at "{company}".
 
@@ -610,10 +431,7 @@ def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional
     Challenge and Root Cause: {challenge_and_root_cause}
 
     {cv_context}
-    Respond strictly in JSON format, conforming to this schema:
-    {{
-        "COVER_LETTER_HOOK": "string"
-    }}
+    Respond strictly in JSON format, conforming to the main schema's "COVER_LETTER_HOOK" property.
 
     Job Title: {job_title}
     Company: {company}
@@ -627,7 +445,7 @@ def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional
     try:
         response_hook = model.generate_content(
             prompt_cover_letter_hook,
-            generation_config={"response_mime_type": "application/json", "response_schema": hook_json_schema}
+            generation_config=json_generation_config # Use the full schema
         )
         parsed_data = json.loads(response_hook.text)
         cover_letter_hook = parsed_data.get("COVER_LETTER_HOOK", "N/A")
@@ -639,13 +457,7 @@ def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional
 
 
     # --- MODIFIED Prompt 2: Generate Full Cover Letter Draft ---
-    # Changed: Added schema to generation_config for this prompt
-    cover_letter_json_schema = {
-        "type": "OBJECT",
-        "properties": {
-            "COVER_LETTER": {"type": "STRING"}
-        }
-    }
+    # Changed: Removed individual schema as full schema is in json_generation_config
     prompt2_cover_letter = f"""
     You are writing a cover letter applying for the "{job_title}" role at "{company}".
     Here's what you have so far, keep this word for word:
@@ -656,10 +468,7 @@ def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional
     Do NOT include salutation, closing, or placeholders like "[Your Name]". Focus on the content of the letter.
 
     {cv_context}
-    Respond strictly in JSON format, conforming to this schema:
-    {{
-        "COVER_LETTER": "string"
-    }}
+    Respond strictly in JSON format, conforming to the main schema's "COVER_LETTER" property.
 
     Job Title: {job_title}
     Company: {company}
@@ -673,7 +482,7 @@ def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional
     try:
         response2 = model.generate_content(
             prompt2_cover_letter,
-            generation_config={"response_mime_type": "application/json", "response_schema": cover_letter_json_schema}
+            generation_config=json_generation_config # Use the full schema
         )
         parsed_data = json.loads(response2.text)
         cover_letter = parsed_data.get("COVER_LETTER", "N/A")
@@ -685,13 +494,7 @@ def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional
 
 
     # --- Prompt 3: Generate "Tell Me About Yourself" Response (UPDATED) ---
-    # Changed: Added schema to generation_config for this prompt
-    tmay_json_schema = {
-        "type": "OBJECT",
-        "properties": {
-            "TELL_ME_ABOUT_YOURSELF": {"type": "STRING"}
-        }
-    }
+    # Changed: Removed individual schema as full schema is in json_generation_config
     prompt3_tell_me_about_yourself = f"""
     You are a career coach. Based *strictly* on the experiences and qualifications provided in the CV content, and the job description, draft a concise and compelling "Tell me about yourself" response (around 100-150 words).
 
@@ -702,10 +505,7 @@ def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional
 
     If the CV does not contain information directly relevant to the identified challenge, generate a general "Tell Me About Yourself" response based on the CV and job description, clearly stating that direct connection to the challenge isn't evident in the provided CV.
 
-    Respond strictly in JSON format, conforming to this schema:
-    {{
-        "TELL_ME_ABOUT_YOURSELF": "string"
-    }}
+    Respond strictly in JSON format, conforming to the main schema's "TELL_ME_ABOUT_YOURSELF" property.
 
     Job Title: {job_title}
     Company: {company}
@@ -724,7 +524,7 @@ def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional
     try:
         response3 = model.generate_content(
             prompt3_tell_me_about_yourself,
-            generation_config={"response_mime_type": "application/json", "response_schema": tmay_json_schema}
+            generation_config=json_generation_config # Use the full schema
         )
         parsed_data = json.loads(response3.text)
         tell_me_about_yourself = parsed_data.get("TELL_ME_ABOUT_YOURSELF", "N/A")
@@ -736,23 +536,7 @@ def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional
 
 
     # --- Prompt 4: Suggest Main Changes to CV (UPDATED for Two Columns) ---
-    # Changed: Added schema to generation_config for this prompt
-    cv_changes_json_schema = {
-        "type": "OBJECT",
-        "properties": {
-            "MAIN_CHANGES_TO_MY_CV": {
-                "type": "ARRAY",
-                "items": {
-                    "type": "OBJECT",
-                    "properties": {
-                        "original_cv_text": {"type": "STRING"},
-                        "proposed_update": {"type": "STRING"}
-                    },
-                    "required": ["original_cv_text", "proposed_update"]
-                }
-            }
-        }
-    }
+    # Changed: Removed individual schema as full schema is in json_generation_config
     prompt4_cv_changes = f"""
     You are a resume expert. Based on the following job description AND the provided CV content, identify 3-5 key areas where an applicant's CV could be optimized to better align with this specific role.
 
@@ -762,16 +546,7 @@ def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional
 
     If the provided CV content is "No CV content provided.", or if no specific phrases can be identified for direct rephrasing, then provide 3-5 general recommendations. In this fallback case, for each recommendation, set "original_cv_text" to "General advice (No CV provided)" and provide a general proposed update in "proposed_update".
 
-    Respond strictly in JSON format, conforming to this schema:
-    {{
-        "MAIN_CHANGES_TO_MY_CV": [
-            {{
-                "original_cv_text": "string", // Exact original text from CV or "General advice (No CV provided)"
-                "proposed_update": "string"    // Proposed new text
-            }},
-            // ... up to 5 such objects
-        ]
-    }}
+    Respond strictly in JSON format, conforming to the main schema's "MAIN_CHANGES_TO_MY_CV" property.
 
     Job Title: {job_title}
     Company: {company}
@@ -789,15 +564,13 @@ def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional
     try:
         response4 = model.generate_content(
             prompt4_cv_changes,
-            generation_config={"response_mime_type": "application/json", "response_schema": cv_changes_json_schema}
+            generation_config=json_generation_config # Use the full schema
         )
         parsed_data = json.loads(response4.text)
 
-        # Validate the structure of the returned data for MAIN_CHANGES_TO_MY_CV
         if isinstance(parsed_data.get("MAIN_CHANGES_TO_MY_CV"), list):
             temp_list = []
             for item in parsed_data["MAIN_CHANGES_TO_MY_CV"]:
-                # Changed: Check for both keys, as required by the schema
                 if isinstance(item, dict) and "original_cv_text" in item and "proposed_update" in item:
                     temp_list.append(item)
                 else:
@@ -810,7 +583,6 @@ def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional
         logging.info("Prompt 4 successful. CV changes suggested.")
     except json.JSONDecodeError as e:
         logging.error(f"Error parsing JSON from Prompt 4: {e}. Raw response: '{response4.text}'")
-        # Attempt to clean up if the model still misbehaves (less likely with response_mime_type)
         cleaned_text = response4.text.strip()
         if cleaned_text.startswith("```json") and cleaned_text.endswith("```"):
             cleaned_text = cleaned_text[len("```json"): -len("```")].strip()
@@ -835,24 +607,12 @@ def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional
         main_changes_to_my_cv = []
 
     # --- Prompt 5: Generate Questions to Ask in Interview ---
-    # Changed: Added schema to generation_config for this prompt
-    questions_json_schema = {
-        "type": "OBJECT",
-        "properties": {
-            "QUESTIONS_TO_ASK": {
-                "type": "ARRAY",
-                "items": {"type": "STRING"}
-            }
-        }
-    }
+    # Changed: Removed individual schema as full schema is in json_generation_config
     prompt5_questions_to_ask = f"""
     You are an interview coach. Based on the following job description and company, suggest 3-5 insightful questions a candidate should ask the interviewer.
     Focus on questions that show genuine interest, strategic thinking, or a desire to understand the team/company culture.
     {cv_context}
-    Respond strictly in JSON format, conforming to this schema:
-    {{
-        "QUESTIONS_TO_ASK": ["string", "string", ...]
-    }}
+    Respond strictly in JSON format, conforming to the main schema's "QUESTIONS_TO_ASK" property.
 
     Job Title: {job_title}
     Company: {company}
@@ -866,7 +626,7 @@ def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional
     try:
         response5 = model.generate_content(
             prompt5_questions_to_ask,
-            generation_config={"response_mime_type": "application/json", "response_schema": questions_json_schema}
+            generation_config=json_generation_config # Use the full schema
         )
         parsed_data = json.loads(response5.text)
         questions_to_ask = parsed_data.get("QUESTIONS_TO_ASK", [])
@@ -880,9 +640,9 @@ def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional
     final_result = {
         "JOB_TITLE": job_title,
         "COMPANY": company,
-        "URL": url, # Changed: Ensure URL from function argument is used
+        "URL": url,
         "LOCATION": location,
-        "JOB_DESCRIPTION": job_description_extracted, # Changed: Use the LLM-extracted description
+        "JOB_DESCRIPTION": job_description_extracted, # Use the LLM-extracted description
         "CHALLENGE_AND_ROOT_CAUSE": challenge_and_root_cause,
         "COVER_LETTER_HOOK": cover_letter_hook,
         "COVER_LETTER": cover_letter,
@@ -895,10 +655,7 @@ def analyze_job_posting_with_gemini(content: str, url: str, cv_content: Optional
     return final_result
 
 
-# --- Main Execution Block ---
-# This block is for direct script execution (e.g., python url_analyzer.py)
-# and won't run when imported by main.py (your FastAPI app).
-# It's useful for testing url_analyzer.py in isolation.
+# --- Main Execution Block (for local testing of url_analyzer.py in isolation) ---
 if __name__ == "__main__":
     test_url = input("Enter the URL of the job posting to analyze: ")
     if not test_url.startswith('http'):
@@ -918,11 +675,9 @@ if __name__ == "__main__":
     scraped_content = scrape_url_content(test_url)
 
     if scraped_content:
-        # --- Print scraped content for debugging ---
         print("\n--- RAW SCRAPED CONTENT (for review): ---")
         print(scraped_content)
         print("\n--- END OF RAW SCRAPED CONTENT ---")
-        # --- END Debugging ---
 
         print("\n--- Content Scraped successfully. Analyzing with Gemini... ---")
         analysis_result = analyze_job_posting_with_gemini(scraped_content, test_url, cv_content)
@@ -931,4 +686,3 @@ if __name__ == "__main__":
         print(json.dumps(analysis_result, indent=4, ensure_ascii=False))
     else:
         print("\n--- Failed to scrape job posting content. Cannot proceed with Gemini analysis. ---")
-
