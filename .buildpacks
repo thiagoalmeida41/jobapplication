@@ -1,1 +1,2 @@
-https://github.com/mxschmitt/heroku-buildpack-playwright
+https://github.com/heroku/heroku-buildpack-apt
+https://github.com/heroku/heroku-buildpack-python
