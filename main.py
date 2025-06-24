@@ -2,7 +2,7 @@ import logging
 import os
 import json
 from io import BytesIO
-from typing import Optional, Dict
+from typing import Optional, Dict, Any
 
 import uvicorn
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
@@ -44,7 +44,7 @@ except Exception as e:
 app = FastAPI(
     title="Job Application AI Assistant",
     description="An API that uses Gemini to analyze a job description and CV.",
-    version="1.1.0"
+    version="1.2.0"
 )
 
 # --- Core Functions ---
@@ -65,90 +65,97 @@ def parse_cv_from_upload(file: UploadFile) -> Optional[str]:
         logger.error(f"An unexpected error occurred while parsing CV '{file.filename}': {e}", exc_info=True)
         return None
 
-async def safe_gemini_call(prompt: str, prompt_name: str, part_key: str, config: Dict) -> any:
-    """A robust wrapper for making calls to the Gemini API."""
+async def safe_gemini_call(prompt: str, prompt_name: str, schema: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """A robust wrapper for making calls to the Gemini API with a specific schema."""
     logger.info(f"Sending prompt: '{prompt_name}'...")
+    config = {
+        "response_mime_type": "application/json",
+        "response_schema": schema
+    }
     try:
         response = model.generate_content(prompt, generation_config=config)
+        # The response should be valid JSON as per the schema.
         parsed_data = json.loads(response.text)
-        result = parsed_data.get(part_key)
-        if result is not None:
-            logger.info(f"Prompt '{prompt_name}' successful.")
-            return result
-        else:
-             logger.warning(f"'{prompt_name}' completed but key '{part_key}' not in response.")
-             return None
+        logger.info(f"Prompt '{prompt_name}' successful.")
+        return parsed_data
+    except json.JSONDecodeError as json_err:
+        logger.error(f"JSONDecodeError during '{prompt_name}': {json_err}. Raw response: '{response.text}'")
+        return None
     except Exception as e:
-        logger.error(f"Error during '{prompt_name}' execution: {e}", exc_info=True)
-        # Try to clean up the response text if it's a JSON error
-        try:
-            raw_text = response.text
-            clean_text = raw_text.strip().replace("```json", "").replace("```", "")
-            parsed_data = json.loads(clean_text)
-            logger.warning(f"Successfully recovered from malformed JSON in '{prompt_name}'.")
-            return parsed_data.get(part_key)
-        except Exception:
-            logger.error(f"Failed to recover from JSON error for '{prompt_name}'.")
-            return None
+        logger.error(f"An unexpected error during '{prompt_name}' execution: {e}", exc_info=True)
+        return None
+
 
 async def analyze_job_posting_with_gemini(
     job_description_raw: str, job_url: str, cv_content: Optional[str]
-) -> Dict[str, any]:
+) -> Dict[str, Any]:
     """Orchestrates a series of prompts to Gemini AI for analysis."""
     if not job_description_raw or not job_description_raw.strip():
         raise ValueError("Job description content is empty.")
 
-    json_config = {"response_mime_type": "application/json"}
-    
-    # --- Prompt 1: Core Information Extraction ---
-    prompt1 = f"""Analyze the job posting to extract: JOB_TITLE, COMPANY, LOCATION, and a full JOB_DESCRIPTION. For JOB_DESCRIPTION, capture all relevant details. Exclude generic boilerplate. Format as JSON. If not found, use "N/A". Job Posting: --- {job_description_raw} ---"""
-    logger.info("Sending prompt: 'Core Job Information Extraction'...")
-    job_details = {"JOB_TITLE": "N/A", "COMPANY": "N/A", "LOCATION": "N/A", "JOB_DESCRIPTION": job_description_raw}
-    try:
-        response1 = model.generate_content(prompt1, generation_config=json_config)
-        parsed_data = json.loads(response1.text)
-        job_details = {
-            "JOB_TITLE": parsed_data.get("JOB_TITLE", "N/A"),
-            "COMPANY": parsed_data.get("COMPANY", "N/A"),
-            "LOCATION": parsed_data.get("LOCATION", "N/A"),
-            "JOB_DESCRIPTION": parsed_data.get("JOB_DESCRIPTION", job_description_raw)
+    # --- Schema Definitions for each prompt ---
+    info_schema = {
+        "type": "OBJECT", "properties": {
+            "JOB_TITLE": {"type": "STRING"}, "COMPANY": {"type": "STRING"},
+            "LOCATION": {"type": "STRING"}, "JOB_DESCRIPTION": {"type": "STRING"}
         }
-        logger.info(f"Core information extracted for: {job_details['JOB_TITLE']}")
-    except Exception as e:
-        logger.error(f"Error in Core Info prompt: {e}. Proceeding with raw data.", exc_info=True)
+    }
+    challenge_schema = {"type": "OBJECT", "properties": {"CHALLENGE_AND_ROOT_CAUSE": {"type": "STRING"}}}
+    hook_schema = {"type": "OBJECT", "properties": {"COVER_LETTER_HOOK": {"type": "STRING"}}}
+    cover_letter_schema = {"type": "OBJECT", "properties": {"COVER_LETTER": {"type": "STRING"}}}
+    tell_me_schema = {"type": "OBJECT", "properties": {"TELL_ME_ABOUT_YOURSELF": {"type": "STRING"}}}
+    cv_changes_schema = {
+        "type": "OBJECT", "properties": {
+            "MAIN_CHANGES_TO_MY_CV": {
+                "type": "ARRAY", "items": {
+                    "type": "OBJECT", "properties": {
+                        "original_cv_text": {"type": "STRING"},
+                        "proposed_update": {"type": "STRING"}
+                    }
+                }
+            }
+        }
+    }
+    questions_schema = {"type": "OBJECT", "properties": {"QUESTIONS_TO_ASK": {"type": "ARRAY", "items": {"type": "STRING"}}}}
 
+    # --- Prompt Execution ---
+    prompt1 = f"""Analyze the job posting to extract: JOB_TITLE, COMPANY, LOCATION, and a full JOB_DESCRIPTION. For JOB_DESCRIPTION, capture all relevant details. Exclude generic boilerplate. Format as JSON. If not found, use "N/A". Job Posting: --- {job_description_raw} ---"""
+    job_details_data = await safe_gemini_call(prompt1, "Core Job Information", info_schema)
+    job_details = job_details_data if job_details_data else {"JOB_TITLE": "N/A", "COMPANY": "N/A", "LOCATION": "N/A", "JOB_DESCRIPTION": job_description_raw}
+    
     cv_context = f"\n\nMy CV Content:\n---\n{cv_content}\n---\n" if cv_content else ""
     
-    # --- Subsequent Prompts ---
-    prompt_challenge = f"Based on this job description for '{job_details['JOB_TITLE']}', what's the biggest challenge and its root cause? Job Description: --- {job_details['JOB_DESCRIPTION']} ---"
-    challenge_and_root_cause = await safe_gemini_call(prompt_challenge, "Biggest Challenge", "CHALLENGE_AND_ROOT_CAUSE", json_config) or "N/A"
-
-    prompt_hook = f"Write a cover letter hook (under 100 words) for '{job_details['JOB_TITLE']}'. Empathize with their challenge: '{challenge_and_root_cause}'. Use my CV to connect my experience. Job Description: --- {job_details['JOB_DESCRIPTION']} --- {cv_context}"
-    cover_letter_hook = await safe_gemini_call(prompt_hook, "Cover Letter Hook", "COVER_LETTER_HOOK", json_config) or "N/A"
-
-    prompt_cover_letter = f"Write a full cover letter for '{job_details['JOB_TITLE']}'. Start with this hook: '{cover_letter_hook}'. Expand on how my CV shows I can solve their challenges. Job Description: --- {job_details['JOB_DESCRIPTION']} --- {cv_context}"
-    cover_letter = await safe_gemini_call(prompt_cover_letter, "Full Cover Letter", "COVER_LETTER", json_config) or "N/A"
-
-    prompt_tell_me = f"Create a 'Tell me about yourself' pitch, aligning my CV with the needs of the '{job_details['JOB_TITLE']}' role. Job Description: --- {job_details['JOB_DESCRIPTION']} --- {cv_context}"
-    tell_me_about_yourself = await safe_gemini_call(prompt_tell_me, "Tell Me About Yourself", "TELL_ME_ABOUT_YOURSELF", json_config) or "N/A"
+    prompt_challenge = f"Based on this job description for '{job_details.get('JOB_TITLE')}', what's the biggest challenge and its root cause? Respond with clean JSON, no invalid characters. Job Description: --- {job_details.get('JOB_DESCRIPTION')} ---"
+    challenge_data = await safe_gemini_call(prompt_challenge, "Biggest Challenge", challenge_schema)
     
-    prompt_cv_changes = f"As a resume expert, suggest 3-5 key CV optimizations against this job description. For each, provide 'original_cv_text' and a 'proposed_update'. Job Description: --- {job_details['JOB_DESCRIPTION']} --- My CV: --- {cv_content if cv_content else 'No CV content provided.'} ---"
-    main_changes_to_my_cv = await safe_gemini_call(prompt_cv_changes, "CV Changes", "MAIN_CHANGES_TO_MY_CV", json_config) or []
+    prompt_hook = f"Write a cover letter hook (under 100 words) for '{job_details.get('JOB_TITLE')}'. Empathize with their challenge: '{challenge_data.get('CHALLENGE_AND_ROOT_CAUSE') if challenge_data else ''}'. Use my CV to connect my experience. Job Description: --- {job_details.get('JOB_DESCRIPTION')} --- {cv_context}"
+    hook_data = await safe_gemini_call(prompt_hook, "Cover Letter Hook", hook_schema)
+
+    prompt_cover_letter = f"Write a full cover letter for '{job_details.get('JOB_TITLE')}'. Start with this hook: '{hook_data.get('COVER_LETTER_HOOK') if hook_data else ''}'. Expand on how my CV shows I can solve their challenges. Job Description: --- {job_details.get('JOB_DESCRIPTION')} --- {cv_context}"
+    cover_letter_data = await safe_gemini_call(prompt_cover_letter, "Full Cover Letter", cover_letter_schema)
+
+    prompt_tell_me = f"Create a 'Tell me about yourself' pitch, aligning my CV with the needs of the '{job_details.get('JOB_TITLE')}' role. Job Description: --- {job_details.get('JOB_DESCRIPTION')} --- {cv_context}"
+    tell_me_data = await safe_gemini_call(prompt_tell_me, "Tell Me About Yourself", tell_me_schema)
     
-    prompt_questions = f"Suggest 3-5 insightful questions I should ask an interviewer for the '{job_details['JOB_TITLE']}' role. Job Description: --- {job_details['JOB_DESCRIPTION']} --- {cv_context}"
-    questions_to_ask = await safe_gemini_call(prompt_questions, "Questions to Ask", "QUESTIONS_TO_ASK", json_config) or []
+    prompt_cv_changes = f"As a resume expert, suggest 3-5 key CV optimizations against this job description. For each, provide 'original_cv_text' and a 'proposed_update'. Job Description: --- {job_details.get('JOB_DESCRIPTION')} --- My CV: --- {cv_content if cv_content else 'No CV content provided.'} ---"
+    cv_changes_data = await safe_gemini_call(prompt_cv_changes, "CV Changes", cv_changes_schema)
+    
+    prompt_questions = f"Suggest 3-5 insightful questions I should ask an interviewer for the '{job_details.get('JOB_TITLE')}' role. Job Description: --- {job_details.get('JOB_DESCRIPTION')} --- {cv_context}"
+    questions_data = await safe_gemini_call(prompt_questions, "Questions to Ask", questions_schema)
 
     # --- Construct Final Output ---
     final_result = {
-        "JOB_TITLE": job_details["JOB_TITLE"], "COMPANY": job_details["COMPANY"],
-        "URL": job_url, "LOCATION": job_details["LOCATION"],
-        "JOB_DESCRIPTION": job_details["JOB_DESCRIPTION"],
-        "CHALLENGE_AND_ROOT_CAUSE": challenge_and_root_cause,
-        "COVER_LETTER_HOOK": cover_letter_hook,
-        "COVER_LETTER": cover_letter,
-        "TELL_ME_ABOUT_YOURSELF": tell_me_about_yourself,
-        "MAIN_CHANGES_TO_MY_CV": main_changes_to_my_cv,
-        "QUESTIONS_TO_ASK": questions_to_ask
+        "JOB_TITLE": job_details.get("JOB_TITLE", "N/A"),
+        "COMPANY": job_details.get("COMPANY", "N/A"),
+        "URL": job_url,
+        "LOCATION": job_details.get("LOCATION", "N/A"),
+        "JOB_DESCRIPTION": job_details.get("JOB_DESCRIPTION", job_description_raw),
+        "CHALLENGE_AND_ROOT_CAUSE": challenge_data.get("CHALLENGE_AND_ROOT_CAUSE", "N/A") if challenge_data else "N/A",
+        "COVER_LETTER_HOOK": hook_data.get("COVER_LETTER_HOOK", "N/A") if hook_data else "N/A",
+        "COVER_LETTER": cover_letter_data.get("COVER_LETTER", "N/A") if cover_letter_data else "N/A",
+        "TELL_ME_ABOUT_YOURSELF": tell_me_data.get("TELL_ME_ABOUT_YOURSELF", "N/A") if tell_me_data else "N/A",
+        "MAIN_CHANGES_TO_MY_CV": cv_changes_data.get("MAIN_CHANGES_TO_MY_CV", []) if cv_changes_data else [],
+        "QUESTIONS_TO_ASK": questions_data.get("QUESTIONS_TO_ASK", []) if questions_data else []
     }
     logger.info("All prompts executed. Final structured output prepared.")
     return final_result
@@ -186,4 +193,3 @@ async def root():
 # --- Main Execution Block ---
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-
