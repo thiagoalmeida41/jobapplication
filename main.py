@@ -41,7 +41,7 @@ except Exception as e:
 app = FastAPI(
     title="Job Application AI Assistant",
     description="An API that uses Gemini to analyze a job description and CV.",
-    version="1.3.0"
+    version="1.4.0" # Incremented version to ensure change
 )
 
 # --- Core Functions ---
@@ -140,7 +140,6 @@ async def analyze_job_posting_with_gemini(
     return final_result
 
 # --- API Endpoint Definition ---
-# *** FIX: Removed trailing slash for robustness. ***
 @app.post("/analyze_job_with_ai")
 async def analyze_job_endpoint(
     job_url: str = Form(""),
@@ -148,25 +147,29 @@ async def analyze_job_endpoint(
     cv_file: Optional[UploadFile] = File(None)
 ):
     """Main API endpoint to receive job data and trigger AI analysis."""
-    logger.info(f"Received request for analysis. Job URL: {job_url if job_url else 'Not provided'}")
+    # Added extra logging to confirm the function is being entered.
+    logger.info("--- REQUEST RECEIVED AT /analyze_job_with_ai ENDPOINT ---")
+    logger.info(f"Job URL: {job_url if job_url else 'Not provided'}")
     cv_content = None
     if cv_file and cv_file.filename:
         logger.info(f"Processing CV file: {cv_file.filename}")
         cv_content = parse_cv_from_upload(cv_file)
     
     if not job_description_raw or not job_description_raw.strip():
+        logger.error("Validation failed: job_description_raw cannot be empty.")
         raise HTTPException(status_code=400, detail="job_description_raw cannot be empty.")
 
     try:
         analysis_result = await analyze_job_posting_with_gemini(
             job_description_raw=job_description_raw, job_url=job_url, cv_content=cv_content
         )
+        logger.info("--- ANALYSIS COMPLETE, SENDING 200 OK RESPONSE ---")
         return JSONResponse(content=analysis_result)
     except Exception as e:
-        logger.error(f"Unexpected error during analysis: {e}", exc_info=True)
+        logger.error(f"FATAL: Unexpected error during analysis: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error during analysis.")
 
-@app.get("/", include_in_schema=False)
+@app.get("/")
 async def root():
     return {"message": "Job Application AI Assistant is running and ready."}
 
