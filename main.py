@@ -25,26 +25,23 @@ try:
         raise ValueError("The GOOGLE_API_KEY environment variable is not set.")
     genai.configure(api_key=gemini_api_key)
     logger.info("Successfully configured the Gemini API client.")
-except ValueError as e:
-    logger.critical(f"Configuration Error: {e}")
-    raise RuntimeError(f"Gemini API configuration failed: {e}. The application cannot start.")
 except Exception as e:
-    logger.critical(f"An unexpected error occurred during Gemini API configuration: {e}", exc_info=True)
-    raise RuntimeError(f"An unexpected failure occurred during Gemini API configuration: {e}")
+    logger.critical(f"FATAL: Gemini API configuration failed: {e}", exc_info=True)
+    raise RuntimeError(f"FATAL: Gemini API configuration failed: {e}") from e
 
 # --- Initialize Gemini Model ---
 try:
     model = genai.GenerativeModel('gemini-1.5-flash')
     logger.info("Successfully initialized the 'gemini-1.5-flash' generative model.")
 except Exception as e:
-    logger.critical(f"Failed to initialize the Gemini model: {e}", exc_info=True)
-    raise RuntimeError(f"Could not initialize the generative model: {e}")
+    logger.critical(f"FATAL: Could not initialize Gemini model: {e}", exc_info=True)
+    raise RuntimeError(f"FATAL: Could not initialize Gemini model: {e}") from e
 
 # --- FastAPI Application Initialization ---
 app = FastAPI(
     title="Job Application AI Assistant",
     description="An API that uses Gemini to analyze a job description and CV.",
-    version="1.2.0"
+    version="1.3.0"
 )
 
 # --- Core Functions ---
@@ -74,17 +71,15 @@ async def safe_gemini_call(prompt: str, prompt_name: str, schema: Dict[str, Any]
     }
     try:
         response = model.generate_content(prompt, generation_config=config)
-        # The response should be valid JSON as per the schema.
         parsed_data = json.loads(response.text)
         logger.info(f"Prompt '{prompt_name}' successful.")
         return parsed_data
     except json.JSONDecodeError as json_err:
-        logger.error(f"JSONDecodeError during '{prompt_name}': {json_err}. Raw response: '{response.text}'")
+        logger.error(f"JSONDecodeError during '{prompt_name}': {json_err}. Raw response: '{getattr(response, 'text', 'N/A')}'")
         return None
     except Exception as e:
         logger.error(f"An unexpected error during '{prompt_name}' execution: {e}", exc_info=True)
         return None
-
 
 async def analyze_job_posting_with_gemini(
     job_description_raw: str, job_url: str, cv_content: Optional[str]
@@ -94,28 +89,12 @@ async def analyze_job_posting_with_gemini(
         raise ValueError("Job description content is empty.")
 
     # --- Schema Definitions for each prompt ---
-    info_schema = {
-        "type": "OBJECT", "properties": {
-            "JOB_TITLE": {"type": "STRING"}, "COMPANY": {"type": "STRING"},
-            "LOCATION": {"type": "STRING"}, "JOB_DESCRIPTION": {"type": "STRING"}
-        }
-    }
+    info_schema = {"type": "OBJECT", "properties": {"JOB_TITLE": {"type": "STRING"}, "COMPANY": {"type": "STRING"}, "LOCATION": {"type": "STRING"}, "JOB_DESCRIPTION": {"type": "STRING"}}}
     challenge_schema = {"type": "OBJECT", "properties": {"CHALLENGE_AND_ROOT_CAUSE": {"type": "STRING"}}}
     hook_schema = {"type": "OBJECT", "properties": {"COVER_LETTER_HOOK": {"type": "STRING"}}}
     cover_letter_schema = {"type": "OBJECT", "properties": {"COVER_LETTER": {"type": "STRING"}}}
     tell_me_schema = {"type": "OBJECT", "properties": {"TELL_ME_ABOUT_YOURSELF": {"type": "STRING"}}}
-    cv_changes_schema = {
-        "type": "OBJECT", "properties": {
-            "MAIN_CHANGES_TO_MY_CV": {
-                "type": "ARRAY", "items": {
-                    "type": "OBJECT", "properties": {
-                        "original_cv_text": {"type": "STRING"},
-                        "proposed_update": {"type": "STRING"}
-                    }
-                }
-            }
-        }
-    }
+    cv_changes_schema = {"type": "OBJECT", "properties": {"MAIN_CHANGES_TO_MY_CV": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {"original_cv_text": {"type": "STRING"}, "proposed_update": {"type": "STRING"}}}}}}
     questions_schema = {"type": "OBJECT", "properties": {"QUESTIONS_TO_ASK": {"type": "ARRAY", "items": {"type": "STRING"}}}}
 
     # --- Prompt Execution ---
@@ -161,7 +140,8 @@ async def analyze_job_posting_with_gemini(
     return final_result
 
 # --- API Endpoint Definition ---
-@app.post("/analyze_job_with_ai/")
+# *** FIX: Removed trailing slash for robustness. ***
+@app.post("/analyze_job_with_ai")
 async def analyze_job_endpoint(
     job_url: str = Form(""),
     job_description_raw: str = Form(...),
@@ -193,3 +173,4 @@ async def root():
 # --- Main Execution Block ---
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+
