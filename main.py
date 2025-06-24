@@ -41,11 +41,13 @@ except Exception as e:
 app = FastAPI(
     title="Job Application AI Assistant",
     description="An API that uses Gemini to analyze a job description and CV.",
-    version="1.4.0" # Incremented version to ensure change
+    version="1.5.0" # Incremented version to be sure
 )
+# ADDED A NEW LOG LINE HERE FOR DEBUGGING
+logger.info(f"--- FastAPI App Version {app.version} Initialized ---")
+
 
 # --- Core Functions ---
-
 def parse_cv_from_upload(file: UploadFile) -> Optional[str]:
     """Parses an uploaded .docx file and extracts its text content."""
     if not file.filename.lower().endswith('.docx'):
@@ -176,4 +178,3 @@ async def root():
 # --- Main Execution Block ---
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-
